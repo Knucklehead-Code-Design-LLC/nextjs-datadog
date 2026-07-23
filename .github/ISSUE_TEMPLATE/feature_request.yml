@@ -1,0 +1,50 @@
+name: Feature proposal
+description: Propose a focused capability or compatibility improvement
+title: "[Proposal]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or maintainer problem should the project solve?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe observable behavior without prescribing implementation details unless necessary.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What existing Next.js, Datadog, or OpenTelemetry capability did you evaluate?
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: API and compatibility considerations
+      description: Note affected runtimes, versions, platforms, entry points, or dependencies.
+    validations:
+      required: true
+  - type: textarea
+    id: privacy
+    attributes:
+      label: Security and privacy considerations
+      description: Describe metadata, credentials, transport, sampling, redaction, or failure-mode effects.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Confirmation
+      options:
+        - label: I searched existing issues and proposals.
+          required: true
+        - label: I am willing to help validate or implement this proposal.
+          required: false
