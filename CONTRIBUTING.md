@@ -6,6 +6,12 @@ contract while keeping setup small, behavior explicit, and telemetry secure.
 
 By participating, you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in this project is provided under the
+[Apache License 2.0](LICENSE), without additional terms or conditions. By
+submitting a contribution, you represent that you have the right to license it
+to the project on those terms.
+
 ## Before You Start
 
 Use the repository's issue templates to report a reproducible defect or propose

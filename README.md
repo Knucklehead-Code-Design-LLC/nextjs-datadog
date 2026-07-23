@@ -42,6 +42,5 @@ before implementation.
 
 ## License
 
-The open-source license is being selected before implementation begins. Until a
-license file is added, no permission is granted to copy, modify, or distribute
-the repository contents.
+Licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for
+project attribution and trademark information.
