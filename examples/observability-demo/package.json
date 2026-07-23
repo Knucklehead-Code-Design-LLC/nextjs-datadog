@@ -16,7 +16,7 @@
     "@opentelemetry/sdk-trace-base": "2.10.0",
     "axios": "1.18.1",
     "next": "16.2.11",
-    "nextjs-datadog": "file:../..",
+    "nextjs-datadog": "*",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },

@@ -24,6 +24,12 @@ consumer-facing summary.
    provenance.
 5. Confirm the npm package page, provenance statement, and GitHub release.
 
+The root package is intentionally listed as the `.` npm workspace. Changesets
+only versions packages listed in a workspace when a workspace configuration is
+present, so removing that entry would exclude `nextjs-datadog` from releases.
+The private demo uses `nextjs-datadog: "*"` so npm links the current root
+workspace and Changesets can validate the dependency at every package version.
+
 ## Initial npm bootstrap
 
 npm trusted publishing can only be configured after the package exists. A

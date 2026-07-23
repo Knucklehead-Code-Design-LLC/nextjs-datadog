@@ -24,6 +24,7 @@
   "author": "Knucklehead Code Design LLC",
   "type": "module",
   "workspaces": [
+    ".",
     "examples/observability-demo"
   ],
   "sideEffects": false,
