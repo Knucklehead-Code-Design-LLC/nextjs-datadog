@@ -76,9 +76,33 @@ High-risk changes should prove relevant behavior such as:
 A regression fix should include a test that fails without the fix whenever the
 behavior can be tested reliably.
 
-The exact development commands will be added with the initial package scaffold.
-Until then, a pull request must record every command that was run and any check
-that could not yet be run.
+Install the locked dependency graph and run the complete local gate:
+
+```bash
+npm ci
+npm run verify
+```
+
+`verify` checks formatting, ESLint, TypeScript, behavioral tests with coverage,
+the production dependency audit, the ESM build, published type resolution, the
+tarball manifest, every public entrypoint, and the browser/server dependency
+boundary.
+
+Useful focused commands are:
+
+```bash
+npm test
+npm run test:coverage
+npm run lint
+npm run typecheck
+npm run check:package
+```
+
+Every user-visible fix or feature must also include a Changeset:
+
+```bash
+npm run changeset
+```
 
 ## Pull Request Workflow
 
@@ -125,4 +149,4 @@ The project prefers squash merges so the pull request title becomes the durable
 history entry. Maintainers may edit the title for clarity before merging.
 
 Approval does not guarantee immediate release. Releases follow the project's
-versioning and compatibility policy once that policy is established.
+versioning and compatibility policy in [docs/releasing.md](docs/releasing.md).

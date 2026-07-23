@@ -1,42 +1,310 @@
 # nextjs-datadog
 
-Community-maintained observability integration for Next.js applications using
-Datadog.
+Community-maintained glue for complete Datadog context in Next.js: framework
+route metadata, correlated server logs, OpenTelemetry spans, request IDs, and
+Datadog RUM.
 
 > [!IMPORTANT]
 > This project is independent and is not affiliated with, sponsored by, or
 > endorsed by Datadog, Inc. Datadog is a trademark of Datadog, Inc.
 
-## Status
+## Why
 
-This project is in its initial design phase. It does not have a supported npm
-release yet. Public APIs, runtime support, and deployment adapters will be
-defined before the first prerelease.
+Next.js can report a server error without telling a normal `console.error`
+which route, request, render phase, or active trace failed. `nextjs-datadog`
+connects the supported framework and vendor hooks while keeping transport and
+credentials under your control.
 
-The intended scope includes:
+It provides:
 
-- server-side Next.js error reporting with request and route context;
-- correlation between Datadog RUM, traces, and structured server logs;
-- OpenTelemetry-based tracing for managed hosting environments;
-- safe metadata enrichment and redaction;
-- deployment guidance for AWS Amplify Hosting; and
-- test helpers that prove propagation and telemetry behavior.
+- a Next.js `onRequestError` hook that adds route, router, render, method, and
+  request-ID metadata to the active span and error log;
+- JSON server logs with OpenTelemetry `trace_id` and `span_id` fields that
+  Datadog recognizes for log/trace correlation;
+- W3C Trace Context propagation from same-origin Datadog RUM requests to the
+  Next.js server;
+- Datadog's official Next.js RUM plugin and App/Pages Router helpers;
+- an optional Next.js proxy that creates or forwards `x-request-id`; and
+- AWS Amplify resource metadata helpers.
 
-The project will build on official Next.js, OpenTelemetry, and Datadog APIs. It
-will not reimplement Datadog's browser SDK or claim to be an official Datadog
-integration.
+The package does **not** contain a Datadog API key, send server logs from the
+browser, or create an undocumented direct intake. Server logs go to `stdout`
+and traces go through a standard OpenTelemetry exporter.
 
-## Contributing
+## Requirements
 
-The project welcomes focused issues and pull requests. Read
-[CONTRIBUTING.md](CONTRIBUTING.md) before proposing or implementing a change.
-Larger public API, runtime, transport, dependency, or security decisions should
-start with an issue so maintainers and contributors can agree on the contract
-before implementation.
+- Node.js 20.9 or newer
+- Next.js 15 or 16
+- React 18 or 19
+- a reachable OpenTelemetry Collector or Agent for traces
+- a log forwarding path for the platform's `stdout`
 
-- [Contribution guide](CONTRIBUTING.md)
-- [Project governance](GOVERNANCE.md)
-- [Code of Conduct](CODE_OF_CONDUCT.md)
+The official Datadog Next.js RUM integration requires Next.js 15.3 or newer for
+its `instrumentation-client` integration. AWS Amplify Hosting currently
+documents managed SSR support through Next.js 15, so use Next.js 15 on Amplify
+until AWS adds support for a newer major.
+
+## Install
+
+```bash
+npm install nextjs-datadog \
+  @datadog/browser-rum \
+  @datadog/browser-rum-nextjs \
+  @opentelemetry/api
+```
+
+`@vercel/otel` is installed by this package. The other packages are peers so
+your application owns their versions and browser SDK instance.
+
+## App Router setup
+
+### 1. Initialize RUM
+
+Create `instrumentation-client.ts` in the application root (or `src/` when the
+application uses a `src` directory):
+
+```ts
+import { initNextDatadogRum, onRouterTransitionStart } from 'nextjs-datadog/client';
+
+initNextDatadogRum({
+  applicationId: process.env.NEXT_PUBLIC_DD_APPLICATION_ID!,
+  clientToken: process.env.NEXT_PUBLIC_DD_CLIENT_TOKEN!,
+  env: process.env.NEXT_PUBLIC_DD_ENV!,
+  service: process.env.NEXT_PUBLIC_DD_SERVICE!,
+  sessionReplaySampleRate: 20,
+  sessionSampleRate: 100,
+  site: 'datadoghq.com',
+  trackLongTasks: true,
+  trackResources: true,
+  trackUserInteractions: true,
+  version: process.env.NEXT_PUBLIC_DD_VERSION!,
+});
+
+export { onRouterTransitionStart };
+```
+
+The client token and application ID are intended for browser use. Never put a
+Datadog API key in a `NEXT_PUBLIC_*` variable.
+
+### 2. Track normalized routes
+
+Mount Datadog's App Router component once:
+
+```tsx
+// app/layout.tsx
+import { DatadogAppRouter } from 'nextjs-datadog/client';
+
+export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  return (
+    <html lang="en">
+      <body>
+        <DatadogAppRouter />
+        {children}
+      </body>
+    </html>
+  );
+}
+```
+
+### 3. Capture client error boundaries
+
+```tsx
+// app/error.tsx
+'use client';
+
+import { useEffect } from 'react';
+import { addNextjsError } from 'nextjs-datadog/client';
+
+export default function ErrorPage({
+  error,
+  reset,
+}: {
+  error: Error & { digest?: string };
+  reset(): void;
+}) {
+  useEffect(() => {
+    addNextjsError(error);
+  }, [error]);
+
+  return <button onClick={reset}>Try again</button>;
+}
+```
+
+For a Server Component error, Next.js exposes the same `error.digest` to the
+client boundary and the server error hook. This gives you a second correlation
+key when a trace was not sampled.
+
+### 4. Capture server request errors
+
+Create `instrumentation.ts` in the same root as `instrumentation-client.ts`:
+
+```ts
+import {
+  createNextDatadogInstrumentation,
+  detectAwsAmplifyResourceAttributes,
+} from 'nextjs-datadog/instrumentation';
+
+const datadog = createNextDatadogInstrumentation({
+  env: process.env.DD_ENV!,
+  resourceAttributes: detectAwsAmplifyResourceAttributes(),
+  service: process.env.DD_SERVICE!,
+  version: process.env.DD_VERSION!,
+});
+
+export const register = datadog.register;
+export const onRequestError = datadog.onRequestError;
+```
+
+This uses Next.js's supported instrumentation contract rather than wrapping
+route handlers individually.
+
+### 5. Propagate a request ID
+
+On Next.js 16, add `proxy.ts`:
+
+```ts
+import { createDatadogProxy } from 'nextjs-datadog/proxy';
+
+export const proxy = createDatadogProxy();
+
+export const config = {
+  matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'],
+};
+```
+
+On Next.js 15, export the same function as `middleware` from `middleware.ts`:
+
+```ts
+import { createDatadogProxy } from 'nextjs-datadog/proxy';
+
+export const middleware = createDatadogProxy();
+```
+
+An existing valid request ID is preserved. Otherwise the proxy generates a
+UUID, forwards it as a request header, and returns it as a response header. Set
+`exposeRequestId: false` to keep it out of the response.
+
+## Pages Router
+
+Initialize RUM in `instrumentation-client.ts` without exporting
+`onRouterTransitionStart`, then mount `DatadogPagesRouter` in `pages/_app.tsx`.
+`ErrorBoundary` is also re-exported from `nextjs-datadog/client`.
+
+## AWS Amplify delivery
+
+Amplify sends SSR runtime output to CloudWatch Logs. The default server logger
+therefore emits one JSON object per line to `stdout`. Subscribe the Amplify
+compute log group to your Datadog log forwarding setup; the package does not
+ship a server credential or bypass CloudWatch.
+
+For traces, configure the standard OpenTelemetry exporter variables in the
+Amplify runtime:
+
+```text
+OTEL_EXPORTER_OTLP_ENDPOINT=https://your-collector.example.com
+OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+```
+
+The endpoint should be an OpenTelemetry Collector or Datadog Agent endpoint
+that is reachable from Amplify and configured to export to Datadog. Keep the
+Datadog API key at the collector/forwarder, not in the Next.js client bundle.
+
+Use the same three unified service tags on the browser and server:
+
+```text
+DD_SERVICE=checkout-web
+DD_ENV=production
+DD_VERSION=<deployed commit SHA>
+
+NEXT_PUBLIC_DD_SERVICE=checkout-web
+NEXT_PUBLIC_DD_ENV=production
+NEXT_PUBLIC_DD_VERSION=<same deployed commit SHA>
+```
+
+## Metadata and privacy
+
+The server error hook records:
+
+| Field                         | Source                                    |
+| ----------------------------- | ----------------------------------------- |
+| `http.request.method`         | Next.js request metadata                  |
+| `http.route`                  | Parameterized Next.js route               |
+| `url.path`                    | Optional path with query/fragment removed |
+| `nextjs.router_kind`          | App Router or Pages Router                |
+| `nextjs.route_type`           | Render, route, action, or proxy           |
+| `nextjs.render_source`        | Next.js render source, if set             |
+| `nextjs.revalidate_reason`    | Revalidation reason, if set               |
+| `request.id`                  | Configured request-ID header              |
+| `trace_id` / `span_id`        | Active OpenTelemetry context              |
+| `error.digest`                | Next.js error digest, if set              |
+| `service` / `env` / `version` | Unified service tags                      |
+
+Concrete URL paths are disabled by default because dynamic segments may contain
+personal data. Set `includeUrlPath: true` only when your route design makes
+paths safe; queries and fragments are still removed. Cookies, authorization
+headers, bodies, and arbitrary request headers are not collected. Attribute
+keys, counts, and string sizes are bounded. Add only low-cardinality,
+non-sensitive application context:
+
+```ts
+const datadog = createNextDatadogInstrumentation({
+  env: process.env.DD_ENV!,
+  getRequestAttributes: ({ request }) => ({
+    // Prefer opaque tenant IDs and feature names. Do not add emails or tokens.
+    'tenant.id': readSyntheticTenantId(request.headers),
+  }),
+  service: process.env.DD_SERVICE!,
+  version: process.env.DD_VERSION!,
+});
+```
+
+Framework-owned metadata cannot be replaced by custom attributes.
+
+## Structured application logs
+
+Use the server-only entrypoint for logs outside `onRequestError`:
+
+```ts
+import { createDatadogLogger } from 'nextjs-datadog/server';
+
+export const logger = createDatadogLogger({
+  env: process.env.DD_ENV!,
+  service: process.env.DD_SERVICE!,
+  version: process.env.DD_VERSION!,
+});
+
+logger.info('Order submitted', {
+  attributes: {
+    'order.id': order.id,
+    'request.id': request.headers.get('x-request-id'),
+  },
+});
+```
+
+When called in an active span, the log contains 32-character hexadecimal
+`trace_id` and 16-character hexadecimal `span_id` fields for Datadog
+correlation. Telemetry serialization and writer failures are contained so they
+cannot fail the application request. Use `transformError` to apply additional
+redaction.
+
+## Runtime boundaries
+
+Import from the narrowest entrypoint:
+
+- `nextjs-datadog/client` — browser RUM only
+- `nextjs-datadog/instrumentation` — Next.js instrumentation and OTel setup
+- `nextjs-datadog/proxy` — request-ID propagation
+- `nextjs-datadog/server` — correlated JSON logging
+- `nextjs-datadog` — shared types and unified tag validation
+
+The package is ESM-only and side-effect free. CI rejects server dependencies in
+the generated client entrypoint.
+
+## Documentation
+
+- [Architecture and data flow](docs/architecture.md)
+- [Release process](docs/releasing.md)
+- [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 - [Support policy](SUPPORT.md)
 

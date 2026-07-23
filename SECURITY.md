@@ -29,10 +29,12 @@ reproducibility, maintainer availability, and upstream dependencies.
 
 ## Supported Versions
 
-The project has not published a supported release. This section will be updated
-before the first npm prerelease. Security fixes will target supported release
-lines and may require upgrading Next.js, Node.js, OpenTelemetry, or Datadog
-dependencies.
+Before the first npm release, security fixes target the `main` branch. After
+release, the latest minor line receives security fixes. Older minor lines are
+not supported unless a GitHub security advisory explicitly says otherwise.
+
+Security fixes may require upgrading Next.js, Node.js, OpenTelemetry, or
+Datadog dependencies. Supported runtime ranges are published in `package.json`.
 
 ## Security Design Expectations
 
