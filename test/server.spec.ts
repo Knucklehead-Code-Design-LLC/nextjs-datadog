@@ -175,11 +175,22 @@ describe('createDatadogLogger', () => {
     const logger = createDatadogLogger({
       env: 'test',
       service: 'web',
-      transformError: ({ digest, kind }) => ({
-        ...(digest ? { digest } : {}),
-        kind,
-        message: '[redacted]',
-      }),
+      transformError: ({ digest, kind }) => {
+        const transformedError = {
+          kind,
+          message: '[redacted]',
+        } as {
+          digest?: string;
+          kind: string;
+          message: string;
+        };
+
+        if (digest) {
+          transformedError.digest = digest;
+        }
+
+        return transformedError;
+      },
       version: '1',
       write,
     });
@@ -195,6 +206,32 @@ describe('createDatadogLogger', () => {
       }),
     );
   });
+
+  it('bounds transformed errors and drops undeclared fields', () => {
+    const write = vi.fn();
+    const logger = createDatadogLogger({
+      env: 'test',
+      service: 'web',
+      transformError: () => ({
+        digest: 'd'.repeat(300),
+        kind: 'k'.repeat(300),
+        message: 'm'.repeat(5_000),
+        stack: 's'.repeat(40_000),
+        unsafe: 'not retained',
+      }),
+      version: '1',
+      write,
+    });
+
+    logger.error('failed', { error: new Error('secret') });
+
+    const record = write.mock.calls[0]?.[1] as DatadogLogRecord;
+    expect(record.error?.digest).toHaveLength(256);
+    expect(record.error?.kind).toHaveLength(256);
+    expect(record.error?.message).toHaveLength(4_096);
+    expect(record.error?.stack).toHaveLength(32_768);
+    expect(record.error).not.toHaveProperty('unsafe');
+  });
 });
 
 describe('serializeError', () => {
@@ -205,15 +242,30 @@ describe('serializeError', () => {
     });
   });
 
+  it('contains thrown-value string conversion failures', () => {
+    const thrownValue = {
+      toString() {
+        throw new Error('conversion failed');
+      },
+    };
+
+    expect(serializeError(thrownValue)).toEqual({
+      kind: 'object',
+      message: '[unserializable thrown value]',
+    });
+  });
+
   it('bounds error messages, stacks, and digests', () => {
     const error = Object.assign(new Error('m'.repeat(5_000)), {
       digest: 'd'.repeat(300),
     });
+    error.name = 'k'.repeat(300);
     error.stack = 's'.repeat(40_000);
 
     const serialized = serializeError(error);
 
     expect(serialized.message).toHaveLength(4_096);
+    expect(serialized.kind).toHaveLength(256);
     expect(serialized.stack).toHaveLength(32_768);
     expect(serialized.digest).toHaveLength(256);
   });

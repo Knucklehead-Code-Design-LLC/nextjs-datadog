@@ -4,6 +4,7 @@ import type { Configuration as VercelOtelConfiguration } from '@vercel/otel';
 
 import { normalizeTelemetryAttributes } from './internal/attributes';
 import { normalizeUnifiedServiceTags } from './internal/config';
+import { normalizeOutboundTracingOrigins } from './internal/outbound-tracing';
 import {
   DEFAULT_REQUEST_ID_HEADER,
   getRecordHeader,
@@ -11,7 +12,14 @@ import {
   normalizeRequestId,
   stripQueryAndFragment,
 } from './internal/request';
-import { createDatadogLogger, type DatadogLogger, type SerializedError } from './server';
+import { createTelemetryPrivacySpanProcessor } from './internal/span-privacy';
+import {
+  createDatadogLogger,
+  serializeError,
+  type CreateDatadogLoggerOptions,
+  type DatadogLogger,
+  type SerializedError,
+} from './server';
 import type { TelemetryAttributes, UnifiedServiceTags } from './types';
 
 type RequestError = Parameters<Instrumentation.onRequestError>[0];
@@ -55,6 +63,13 @@ export interface NextDatadogInstrumentationOptions extends UnifiedServiceTags {
    */
   onRequestError?: (requestError: NextDatadogRequestError) => Promise<void> | void;
   /**
+   * Exact HTTP(S) origins that may receive W3C trace context from server-side
+   * fetch, Axios, and Node.js HTTP requests.
+   *
+   * @exampleValue ['https://api.example.com', 'http://localhost:4000']
+   */
+  outboundTracingOrigins?: readonly string[];
+  /**
    * Additional @vercel/otel configuration. Service and resource attributes are
    * owned by nextjs-datadog.
    */
@@ -67,13 +82,14 @@ export interface NextDatadogInstrumentationOptions extends UnifiedServiceTags {
 
 export interface NextDatadogInstrumentation {
   onRequestError: Instrumentation.onRequestError;
-  register(): Promise<void>;
+  register: () => Promise<void>;
 }
 
 type Environment = Readonly<Record<string, string | undefined>>;
 
 const CUSTOM_REQUEST_ATTRIBUTE_LIMIT = 48;
 const REQUEST_ATTRIBUTE_KEYS = new Set([
+  'error.digest',
   'http.request.method',
   'http.route',
   'nextjs.render_source',
@@ -93,13 +109,25 @@ const setSpanError = (
     return;
   }
 
-  const exception = error instanceof Error ? error : new Error(String(error));
+  const serializedError = serializeError(error);
+  const exception: {
+    message: string;
+    name: string;
+    stack?: string;
+  } = {
+    message: serializedError.message,
+    name: serializedError.kind,
+  };
+
+  if (serializedError.stack) {
+    exception.stack = serializedError.stack;
+  }
 
   span.recordException(exception);
   span.setAttributes(attributes);
   span.setStatus({
     code: SpanStatusCode.ERROR,
-    message: exception.message,
+    message: serializedError.message,
   });
 };
 
@@ -110,16 +138,34 @@ const createRequestAttributes = (
   includeUrlPath: boolean,
 ): TelemetryAttributes => {
   const requestId = normalizeRequestId(getRecordHeader(request.headers, requestIdHeader));
-
-  return {
+  const attributes: Record<string, boolean | number | string | undefined> = {
     'http.request.method': request.method,
     'http.route': requestContext.routePath,
     'nextjs.render_source': requestContext.renderSource,
     'nextjs.revalidate_reason': requestContext.revalidateReason,
     'nextjs.route_type': requestContext.routeType,
     'nextjs.router_kind': requestContext.routerKind,
-    ...(requestId ? { 'request.id': requestId } : {}),
-    ...(includeUrlPath ? { 'url.path': stripQueryAndFragment(request.path) } : {}),
+  };
+
+  if (requestId) {
+    attributes['request.id'] = requestId;
+  }
+
+  if (includeUrlPath) {
+    attributes['url.path'] = stripQueryAndFragment(request.path);
+  }
+
+  return attributes;
+};
+
+const createErrorAttributes = (error: RequestError): TelemetryAttributes => {
+  const serializedError = serializeError(error);
+  if (!serializedError.digest) {
+    return {};
+  }
+
+  return {
+    'error.digest': serializedError.digest,
   };
 };
 
@@ -145,9 +191,23 @@ const registerDefaultOpenTelemetry: RegisterOpenTelemetry = async (configuration
   registerOTel(configuration);
 };
 
+const isAwsAmplifyEnvironment = (environment: Environment): boolean => {
+  const identityValues = [
+    environment.AWS_APP_ID,
+    environment.AWS_BRANCH,
+    environment.AWS_COMMIT_ID,
+  ];
+
+  return identityValues.some((value) => typeof value === 'string' && value.length > 0);
+};
+
 export const detectAwsAmplifyResourceAttributes = (
   environment: Environment = process.env,
 ): Record<string, string> => {
+  if (!isAwsAmplifyEnvironment(environment)) {
+    return {};
+  }
+
   const region = environment.AWS_REGION ?? environment.AWS_DEFAULT_REGION;
 
   return normalizeTelemetryAttributes({
@@ -160,56 +220,117 @@ export const detectAwsAmplifyResourceAttributes = (
   }) as Record<string, string>;
 };
 
-export const createNextDatadogInstrumentation = (
+const createDefaultLogger = (
+  tags: Readonly<UnifiedServiceTags>,
   options: NextDatadogInstrumentationOptions,
-): NextDatadogInstrumentation => {
-  const tags = normalizeUnifiedServiceTags(options);
-  const requestIdHeader = normalizeHeaderName(options.requestIdHeader ?? DEFAULT_REQUEST_ID_HEADER);
-  const logger =
-    options.logger ??
-    createDatadogLogger({
-      ...tags,
-      ...(options.transformError ? { transformError: options.transformError } : {}),
-    });
+): DatadogLogger => {
+  const loggerOptions: CreateDatadogLoggerOptions = { ...tags };
+  if (options.transformError) {
+    loggerOptions.transformError = options.transformError;
+  }
 
-  const register = async (): Promise<void> => {
+  return createDatadogLogger(loggerOptions);
+};
+
+const createSpanProcessors = (
+  options: NextDatadogInstrumentationOptions,
+): NonNullable<VercelOtelConfiguration['spanProcessors']> => {
+  const privacyProcessor = createTelemetryPrivacySpanProcessor();
+  if (!options.otel?.spanProcessors) {
+    return [privacyProcessor, 'auto'];
+  }
+
+  return [privacyProcessor, ...options.otel.spanProcessors];
+};
+
+const createOpenTelemetryConfiguration = (
+  options: NextDatadogInstrumentationOptions,
+  tags: Readonly<UnifiedServiceTags>,
+  outboundTracingOrigins: readonly string[],
+): VercelOtelConfiguration => {
+  const resourceAttributes = normalizeTelemetryAttributes(options.resourceAttributes);
+  const configuration: VercelOtelConfiguration = {
+    ...options.otel,
+    attributes: {
+      ...resourceAttributes,
+      'deployment.environment.name': tags.env,
+      env: tags.env,
+      'service.name': tags.service,
+      'service.version': tags.version,
+    },
+    serviceName: tags.service,
+    spanProcessors: createSpanProcessors(options),
+  };
+
+  if (outboundTracingOrigins.length === 0) {
+    return configuration;
+  }
+
+  const configuredPropagationUrls =
+    options.otel?.instrumentationConfig?.fetch?.propagateContextUrls ?? [];
+  configuration.instrumentationConfig = {
+    ...options.otel?.instrumentationConfig,
+    fetch: {
+      ...options.otel?.instrumentationConfig?.fetch,
+      propagateContextUrls: [...configuredPropagationUrls, ...outboundTracingOrigins],
+    },
+  };
+
+  return configuration;
+};
+
+const createRegister = (
+  options: NextDatadogInstrumentationOptions,
+  tags: Readonly<UnifiedServiceTags>,
+  outboundTracingOrigins: readonly string[],
+): (() => Promise<void>) => {
+  let registration: Promise<void> | undefined;
+
+  const registerOnce = async (): Promise<void> => {
     if (process.env.NEXT_RUNTIME === 'edge' && !options.instrumentEdgeRuntime) {
       return;
     }
 
-    const resourceAttributes = normalizeTelemetryAttributes(options.resourceAttributes);
-    const configuration: VercelOtelConfiguration = {
-      ...options.otel,
-      attributes: {
-        ...resourceAttributes,
-        'deployment.environment.name': tags.env,
-        env: tags.env,
-        'service.name': tags.service,
-        'service.version': tags.version,
-      },
-      serviceName: tags.service,
-    };
     const registerOpenTelemetry = options.registerOpenTelemetry ?? registerDefaultOpenTelemetry;
-
+    const configuration = createOpenTelemetryConfiguration(options, tags, outboundTracingOrigins);
     await registerOpenTelemetry(configuration);
   };
 
-  const onRequestError: Instrumentation.onRequestError = async (error, request, requestContext) => {
+  return (): Promise<void> => {
+    registration ??= registerOnce();
+    return registration;
+  };
+};
+
+const getCustomRequestAttributes = async (
+  options: NextDatadogInstrumentationOptions,
+  requestError: Omit<NextDatadogRequestError, 'attributes'>,
+  logger: Pick<DatadogLogger, 'warn'>,
+): Promise<TelemetryAttributes> => {
+  if (!options.getRequestAttributes) {
+    return {};
+  }
+
+  try {
+    return await options.getRequestAttributes(requestError);
+  } catch (error) {
+    writeDiagnostic(logger, 'request_attributes', error);
+    return {};
+  }
+};
+
+const createOnRequestError = (
+  options: NextDatadogInstrumentationOptions,
+  logger: Pick<DatadogLogger, 'error' | 'warn'>,
+  requestIdHeader: string,
+): Instrumentation.onRequestError => {
+  return async (error, request, requestContext) => {
     const baseRequestError = {
       context: requestContext,
       error,
       request,
     };
-    let customAttributes: TelemetryAttributes = {};
-
-    if (options.getRequestAttributes) {
-      try {
-        customAttributes = await options.getRequestAttributes(baseRequestError);
-      } catch (attributeError) {
-        writeDiagnostic(logger, 'request_attributes', attributeError);
-      }
-    }
-
+    const customAttributes = await getCustomRequestAttributes(options, baseRequestError, logger);
     const normalizedCustomAttributes = normalizeTelemetryAttributes(customAttributes, {
       attributeLimit: CUSTOM_REQUEST_ATTRIBUTE_LIMIT,
       reservedKeys: REQUEST_ATTRIBUTE_KEYS,
@@ -219,12 +340,14 @@ export const createNextDatadogInstrumentation = (
         request,
         requestContext,
         requestIdHeader,
-        options.includeUrlPath ?? false,
+        options.includeUrlPath === true,
       ),
     );
+    const errorAttributes = normalizeTelemetryAttributes(createErrorAttributes(error));
     const attributes = {
       ...normalizedCustomAttributes,
       ...requestAttributes,
+      ...errorAttributes,
     };
     const requestError: NextDatadogRequestError = {
       ...baseRequestError,
@@ -254,6 +377,17 @@ export const createNextDatadogInstrumentation = (
       }
     }
   };
+};
+
+export const createNextDatadogInstrumentation = (
+  options: NextDatadogInstrumentationOptions,
+): NextDatadogInstrumentation => {
+  const tags = normalizeUnifiedServiceTags(options);
+  const outboundTracingOrigins = normalizeOutboundTracingOrigins(options.outboundTracingOrigins);
+  const requestIdHeader = normalizeHeaderName(options.requestIdHeader ?? DEFAULT_REQUEST_ID_HEADER);
+  const logger = options.logger ?? createDefaultLogger(tags, options);
+  const register = createRegister(options, tags, outboundTracingOrigins);
+  const onRequestError = createOnRequestError(options, logger, requestIdHeader);
 
   return {
     onRequestError,

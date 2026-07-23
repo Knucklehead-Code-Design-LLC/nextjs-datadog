@@ -23,6 +23,9 @@
   "license": "Apache-2.0",
   "author": "Knucklehead Code Design LLC",
   "type": "module",
+  "workspaces": [
+    "examples/observability-demo"
+  ],
   "sideEffects": false,
   "files": [
     "dist",
@@ -67,17 +70,21 @@
     "build": "tsup",
     "changeset": "changeset",
     "check:client-boundary": "node scripts/check-client-boundary.mjs",
+    "check:demo": "npm run build --workspace @nextjs-datadog/observability-demo",
     "check:package": "npm run build && publint && attw --pack . --profile esm-only && npm run check:client-boundary && node scripts/check-entrypoints.mjs",
     "clean": "node -e \"require('node:fs').rmSync('dist', { force: true, recursive: true })\"",
+    "demo": "npm run build && npm run dev --workspace @nextjs-datadog/observability-demo",
+    "demo:build": "npm run build && npm run check:demo",
     "format:check": "prettier --check .",
     "format:write": "prettier --write .",
     "lint": "eslint .",
+    "prelint": "npm run build",
     "prepack": "npm run build",
     "release": "changeset publish",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
-    "verify": "npm run format:check && npm run lint && npm run typecheck && npm run test:coverage && npm run audit:production && npm run check:package",
+    "verify": "npm run format:check && npm run lint && npm run typecheck && npm run test:coverage && npm run audit:production && npm run check:package && npm run check:demo",
     "version-packages": "changeset version"
   },
   "dependencies": {

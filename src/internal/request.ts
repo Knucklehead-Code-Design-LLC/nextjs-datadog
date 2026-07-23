@@ -5,6 +5,10 @@ const MAX_PATH_LENGTH = 2_048;
 export const DEFAULT_REQUEST_ID_HEADER = 'x-request-id';
 
 export const normalizeHeaderName = (headerName: string): string => {
+  if (typeof headerName !== 'string') {
+    throw new TypeError('Invalid HTTP header name: expected a string');
+  }
+
   const normalizedHeaderName = headerName.trim().toLowerCase();
 
   if (!HEADER_NAME_PATTERN.test(normalizedHeaderName)) {
@@ -15,7 +19,7 @@ export const normalizeHeaderName = (headerName: string): string => {
 };
 
 export const normalizeRequestId = (requestId: string | undefined): string | undefined => {
-  if (!requestId || !REQUEST_ID_PATTERN.test(requestId)) {
+  if (typeof requestId !== 'string' || !REQUEST_ID_PATTERN.test(requestId)) {
     return undefined;
   }
 
@@ -33,7 +37,11 @@ export const getRecordHeader = (
       continue;
     }
 
-    return Array.isArray(value) ? value[0] : value;
+    if (Array.isArray(value)) {
+      return value[0];
+    }
+
+    return value;
   }
 
   return undefined;
@@ -43,8 +51,17 @@ export const stripQueryAndFragment = (path: string): string => {
   const queryIndex = path.indexOf('?');
   const fragmentIndex = path.indexOf('#');
   const indexes = [queryIndex, fragmentIndex].filter((index) => index >= 0);
-  const endIndex = indexes.length === 0 ? path.length : Math.min(...indexes);
+  let endIndex = path.length;
+
+  if (indexes.length > 0) {
+    endIndex = Math.min(...indexes);
+  }
+
   const pathWithoutQuery = path.slice(0, endIndex);
 
-  return (pathWithoutQuery || '/').slice(0, MAX_PATH_LENGTH);
+  if (!pathWithoutQuery) {
+    return '/';
+  }
+
+  return pathWithoutQuery.slice(0, MAX_PATH_LENGTH);
 };

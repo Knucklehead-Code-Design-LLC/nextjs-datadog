@@ -10,6 +10,10 @@ interface NormalizeTelemetryAttributesOptions {
   stringLimit?: number;
 }
 
+const canIncludeAttribute = (key: string, reservedKeys: ReadonlySet<string>): boolean => {
+  return ATTRIBUTE_KEY_PATTERN.test(key) && !reservedKeys.has(key);
+};
+
 const normalizeAttributeValue = (
   value: TelemetryAttributeValue | null | undefined,
   stringLimit: number,
@@ -19,10 +23,18 @@ const normalizeAttributeValue = (
   }
 
   if (typeof value === 'number') {
-    return Number.isFinite(value) ? value : undefined;
+    if (Number.isFinite(value)) {
+      return value;
+    }
+
+    return undefined;
   }
 
-  return typeof value === 'boolean' ? value : undefined;
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  return undefined;
 };
 
 export const normalizeTelemetryAttributes = (
@@ -42,11 +54,11 @@ export const normalizeTelemetryAttributes = (
   let normalizedAttributeCount = 0;
 
   for (const [key, value] of Object.entries(attributes)) {
-    if (
-      normalizedAttributeCount >= attributeLimit ||
-      !ATTRIBUTE_KEY_PATTERN.test(key) ||
-      reservedKeys.has(key)
-    ) {
+    if (normalizedAttributeCount >= attributeLimit) {
+      break;
+    }
+
+    if (!canIncludeAttribute(key, reservedKeys)) {
       continue;
     }
 
