@@ -13,6 +13,8 @@ Browser navigation
             └─ Next.js server span
                  ├─ onRequestError route/render/request metadata
                  ├─ structured stdout log with trace_id + span_id
+                 ├─ fetch/Axios client span
+                 │    └─ allowlisted W3C propagation → backend service span
                  └─ OTLP exporter → Collector/Agent → Datadog APM
 
 Amplify stdout → CloudWatch Logs → Datadog forwarding → Datadog Logs
@@ -21,6 +23,8 @@ Amplify stdout → CloudWatch Logs → Datadog forwarding → Datadog Logs
 Correlations use multiple durable keys:
 
 - W3C trace context links a RUM resource to a backend trace.
+- exact-origin outbound propagation links the Next.js request to services that
+  explicitly accept W3C Trace Context.
 - OpenTelemetry `trace_id` and `span_id` link server logs to the active trace.
 - unified `service`, `env`, and `version` values align browser and server data.
 - `error.digest` links a redacted Server Component error in RUM to its full
@@ -78,3 +82,28 @@ collected.
 Custom attributes accept only primitive values, use validated keys, and are
 bounded by count and string length. Core route and request fields take
 precedence over custom attributes.
+
+A privacy processor runs before configured exporters. It removes URL
+credentials, query strings, and fragments from standard outbound URL attributes
+and URL-shaped span names, then bounds their length. Paths remain observable so
+operators can identify an outbound resource; applications must not place
+secrets or personal data in paths.
+
+## Outbound request model
+
+`@vercel/otel` owns automatic server-side fetch and Node.js HTTP(S)
+instrumentation. `nextjs-datadog` does not wrap or replace application fetch
+clients. The integration converts `outboundTracingOrigins` into
+`@vercel/otel`'s public `propagateContextUrls` configuration and composes it
+with any advanced fetch instrumentation supplied by the application.
+
+The `@vercel/otel` fetch instrumentation also patches Node.js HTTP(S), so Axios
+using its Node adapter produces client spans without an Axios interceptor.
+Applications keep ownership of their Axios instances, retries, authentication,
+and error handling.
+
+Outbound requests can be traced without propagating their parent. Trace headers
+are added only for configured HTTP(S) origins because third-party services do
+not need application trace context. Exact-origin validation prevents a trusted
+host such as `api.example.com` from accidentally matching
+`api.example.com.attacker.invalid`.

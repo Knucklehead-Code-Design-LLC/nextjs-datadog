@@ -34,4 +34,27 @@ describe('defineUnifiedServiceTags', () => {
       }),
     ).toThrow('service must not exceed 200 characters');
   });
+
+  it.each(['checkout web', 'production,west', '🔥'])(
+    'rejects a tag value that Datadog would normalize inconsistently: %s',
+    (service) => {
+      expect(() =>
+        defineUnifiedServiceTags({
+          env: 'test',
+          service,
+          version: '1',
+        }),
+      ).toThrow('service must contain only');
+    },
+  );
+
+  it('rejects non-string tags at runtime', () => {
+    expect(() =>
+      defineUnifiedServiceTags({
+        env: 'test',
+        service: undefined as never,
+        version: '1',
+      }),
+    ).toThrow('service to be a string');
+  });
 });

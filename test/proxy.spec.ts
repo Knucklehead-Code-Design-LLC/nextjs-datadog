@@ -63,6 +63,16 @@ describe('createDatadogRequestContext', () => {
         generateRequestId: () => 'invalid generated ID',
       }),
     ).toThrow('request ID generator returned an invalid value');
+    expect(() =>
+      createDatadogRequestContext(request, {
+        generateRequestId: () => 123 as never,
+      }),
+    ).toThrow('request ID generator returned an invalid value');
+    expect(() =>
+      createDatadogRequestContext(request, {
+        requestIdHeader: 123 as never,
+      }),
+    ).toThrow('Invalid HTTP header name');
   });
 });
 

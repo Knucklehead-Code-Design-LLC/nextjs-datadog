@@ -62,15 +62,22 @@ export const createNextDatadogRumConfiguration = (
   } = options;
   const tags = normalizeUnifiedServiceTags(options);
   const hasNextjsPlugin = plugins.some((plugin) => plugin.name === 'nextjs');
+  const tracingUrls = [...allowedTracingUrls];
+  const rumPlugins = [...plugins];
+
+  if (traceSameOrigin) {
+    tracingUrls.push(createSameOriginTracingUrl());
+  }
+
+  if (!hasNextjsPlugin) {
+    rumPlugins.push(nextjsPlugin());
+  }
 
   return {
     ...rumConfiguration,
-    allowedTracingUrls: [
-      ...allowedTracingUrls,
-      ...(traceSameOrigin ? [createSameOriginTracingUrl()] : []),
-    ],
+    allowedTracingUrls: tracingUrls,
     env: tags.env,
-    plugins: [...plugins, ...(hasNextjsPlugin ? [] : [nextjsPlugin()])],
+    plugins: rumPlugins,
     service: tags.service,
     version: tags.version,
   };

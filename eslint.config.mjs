@@ -2,13 +2,30 @@ import eslint from '@eslint/js';
 import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
-const typeCheckedFiles = ['**/*.ts'];
+const typeCheckedFiles = ['**/*.{ts,tsx}'];
+const implementationFiles = [
+  'src/**/*.{ts,tsx}',
+  'scripts/**/*.mjs',
+  'examples/**/*.{ts,tsx}',
+  '*.{ts,mjs}',
+];
 
 export default tseslint.config(
   {
-    ignores: ['coverage/**', 'dist/**', 'node_modules/**'],
+    ignores: ['**/.next/**', 'coverage/**', 'dist/**', 'node_modules/**'],
   },
   eslint.configs.recommended,
+  {
+    rules: {
+      complexity: ['error', 10],
+      curly: ['error', 'all'],
+      eqeqeq: ['error', 'always'],
+      'max-depth': ['error', 3],
+      'max-params': ['error', 4],
+      'no-else-return': 'error',
+      'no-ternary': 'error',
+    },
+  },
   ...tseslint.configs.strictTypeChecked.map((configuration) => ({
     ...configuration,
     files: typeCheckedFiles,
@@ -45,6 +62,20 @@ export default tseslint.config(
         'error',
         {
           allowConstantLoopConditions: 'only-allowed-literals',
+        },
+      ],
+    },
+  },
+  {
+    files: implementationFiles,
+    rules: {
+      'max-lines-per-function': [
+        'error',
+        {
+          IIFEs: true,
+          max: 80,
+          skipBlankLines: true,
+          skipComments: true,
         },
       ],
     },
