@@ -4,6 +4,7 @@ const external = [
   '@datadog/browser-rum',
   '@datadog/browser-rum-nextjs',
   '@opentelemetry/api',
+  '@opentelemetry/sdk-trace-base',
   '@vercel/otel',
   'next',
   'next/server',

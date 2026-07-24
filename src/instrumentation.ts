@@ -20,7 +20,8 @@ import {
   type DatadogLogger,
   type SerializedError,
 } from './server';
-import type { TelemetryAttributes, UnifiedServiceTags } from './types';
+import type { DatadogDirectOtlpOptions, TelemetryAttributes, UnifiedServiceTags } from './types';
+import { registerDirectDatadogOtlp, type RegisterOpenTelemetry } from './internal/direct-otlp';
 
 type RequestError = Parameters<Instrumentation.onRequestError>[0];
 type RequestErrorRequest = Parameters<Instrumentation.onRequestError>[1];
@@ -33,11 +34,14 @@ export interface NextDatadogRequestError {
   request: RequestErrorRequest;
 }
 
-export type RegisterOpenTelemetry = (
-  configuration: VercelOtelConfiguration,
-) => Promise<void> | void;
-
 export interface NextDatadogInstrumentationOptions extends UnifiedServiceTags {
+  /**
+   * Deliver each completed span directly to Datadog's OTLP/HTTP intake.
+   *
+   * Use this only in short-lived managed runtimes that cannot run or reach an
+   * OpenTelemetry Collector or Datadog Agent.
+   */
+  directOtlp?: DatadogDirectOtlpOptions;
   /**
    * Add low-cardinality application attributes after authentication or routing.
    */
@@ -283,6 +287,7 @@ const createRegister = (
   options: NextDatadogInstrumentationOptions,
   tags: Readonly<UnifiedServiceTags>,
   outboundTracingOrigins: readonly string[],
+  logger: Pick<DatadogLogger, 'warn'>,
 ): (() => Promise<void>) => {
   let registration: Promise<void> | undefined;
 
@@ -291,8 +296,25 @@ const createRegister = (
       return;
     }
 
-    const registerOpenTelemetry = options.registerOpenTelemetry ?? registerDefaultOpenTelemetry;
     const configuration = createOpenTelemetryConfiguration(options, tags, outboundTracingOrigins);
+
+    if (options.directOtlp) {
+      try {
+        let directOtlpDependencies: Parameters<typeof registerDirectDatadogOtlp>[2];
+        if (options.registerOpenTelemetry) {
+          directOtlpDependencies = {
+            registerOpenTelemetry: options.registerOpenTelemetry,
+          };
+        }
+
+        await registerDirectDatadogOtlp(configuration, options.directOtlp, directOtlpDependencies);
+      } catch (error) {
+        writeDiagnostic(logger, 'direct_otlp_registration', error);
+      }
+      return;
+    }
+
+    const registerOpenTelemetry = options.registerOpenTelemetry ?? registerDefaultOpenTelemetry;
     await registerOpenTelemetry(configuration);
   };
 
@@ -386,7 +408,7 @@ export const createNextDatadogInstrumentation = (
   const outboundTracingOrigins = normalizeOutboundTracingOrigins(options.outboundTracingOrigins);
   const requestIdHeader = normalizeHeaderName(options.requestIdHeader ?? DEFAULT_REQUEST_ID_HEADER);
   const logger = options.logger ?? createDefaultLogger(tags, options);
-  const register = createRegister(options, tags, outboundTracingOrigins);
+  const register = createRegister(options, tags, outboundTracingOrigins, logger);
   const onRequestError = createOnRequestError(options, logger, requestIdHeader);
 
   return {
@@ -395,4 +417,11 @@ export const createNextDatadogInstrumentation = (
   };
 };
 
-export type { Instrumentation, TelemetryAttributes, UnifiedServiceTags, VercelOtelConfiguration };
+export type {
+  DatadogDirectOtlpOptions,
+  Instrumentation,
+  RegisterOpenTelemetry,
+  TelemetryAttributes,
+  UnifiedServiceTags,
+  VercelOtelConfiguration,
+};

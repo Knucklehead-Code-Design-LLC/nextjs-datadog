@@ -193,6 +193,35 @@ describe('createNextDatadogInstrumentation', () => {
     expect(registerOpenTelemetry).toHaveBeenCalledOnce();
   });
 
+  it('contains invalid direct delivery configuration and reports a safe diagnostic', async () => {
+    const registerOpenTelemetry = vi.fn();
+    const { logger, warn } = createLogger();
+    const instrumentation = createNextDatadogInstrumentation({
+      directOtlp: {
+        apiKey: 'invalid-secret-value',
+        site: 'us5.datadoghq.com',
+      },
+      env: 'production',
+      logger,
+      registerOpenTelemetry,
+      service: 'checkout-web',
+      version: 'abcdef1',
+    });
+
+    await expect(instrumentation.register()).resolves.toBeUndefined();
+
+    expect(registerOpenTelemetry).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      'nextjs-datadog telemetry reporting failed',
+      expect.objectContaining({
+        attributes: {
+          'nextjs_datadog.diagnostic': 'direct_otlp_registration',
+        },
+      }),
+    );
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('invalid-secret-value');
+  });
+
   it.each([
     ['an empty value', ''],
     ['an oversized value', `https://${'a'.repeat(2_048)}.example.com`],

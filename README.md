@@ -163,9 +163,22 @@ import {
 } from 'nextjs-datadog/instrumentation';
 
 const datadog = createNextDatadogInstrumentation({
+  ...(process.env.DD_API_KEY
+    ? {
+        directOtlp: {
+          apiKey: process.env.DD_API_KEY,
+          site: process.env.NEXT_PUBLIC_DD_SITE!,
+        },
+      }
+    : {}),
   env: process.env.DD_ENV!,
   outboundTracingOrigins: [process.env.BACKEND_ORIGIN!],
-  resourceAttributes: detectAwsAmplifyResourceAttributes(),
+  resourceAttributes: detectAwsAmplifyResourceAttributes({
+    AWS_APP_ID: process.env.AWS_APP_ID,
+    AWS_BRANCH: process.env.AWS_BRANCH,
+    AWS_COMMIT_ID: process.env.AWS_COMMIT_ID,
+    AWS_REGION: process.env.AWS_REGION,
+  }),
   service: process.env.DD_SERVICE!,
   version: process.env.DD_VERSION!,
 });
@@ -281,17 +294,34 @@ therefore emits one JSON object per line to `stdout`. Subscribe the Amplify
 compute log group to your Datadog log forwarding setup; the package does not
 ship a server credential or bypass CloudWatch.
 
-For traces, configure the standard OpenTelemetry exporter variables in the
-Amplify runtime:
+Prefer a reachable OpenTelemetry Collector or Datadog Agent when the hosting
+environment supports one:
 
 ```text
 OTEL_EXPORTER_OTLP_ENDPOINT=https://your-collector.example.com
 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 ```
 
-The endpoint should be an OpenTelemetry Collector or Datadog Agent endpoint
-that is reachable from Amplify and configured to export to Datadog. Keep the
-Datadog API key at the collector/forwarder, not in the Next.js client bundle.
+When Amplify SSR compute cannot run or reach a Collector or Agent, configure
+the explicit `directOtlp` option shown in the server instrumentation example.
+It derives a trusted Datadog OTLP endpoint from the selected Datadog site,
+authenticates with the server-only API key, requests Datadog trace statistics,
+and uses an immediate span processor so short-lived compute does not depend on
+a timer-based batch flush.
+
+Direct delivery intentionally accepts only Datadog's documented sites. A bad
+key or site disables tracing and writes a bounded diagnostic without including
+the configuration value. This mode has less retry and backpressure protection
+than a Collector or Agent, so use it only for constrained managed runtimes.
+Never use a `NEXT_PUBLIC_` name for the API key or import
+`nextjs-datadog/instrumentation` from client code.
+
+Amplify exposes deployment identity while building, but some managed SSR
+runtimes do not retain those variables. If necessary, pass the four explicit
+`AWS_*` values to `detectAwsAmplifyResourceAttributes` and include those
+non-secret values in the server instrumentation build. This prevents
+`@vercel/otel`'s hosting fallback from incorrectly classifying the span as
+Vercel.
 
 Use the same three unified service tags on the browser and server:
 
@@ -323,13 +353,15 @@ The server error hook records:
 | `error.digest`                | Next.js error digest, if set              |
 | `service` / `env` / `version` | Unified service tags                      |
 
-Concrete URL paths are disabled by default because dynamic segments may contain
-personal data. Set `includeUrlPath: true` only when your route design makes
-paths safe; queries and fragments are still removed. Cookies, authorization
-headers, bodies, and arbitrary request headers are not collected. Attribute
-keys, counts, and string sizes are bounded. Outbound span URL credentials,
-queries, and fragments are removed before export; outbound paths remain. Add
-only low-cardinality, non-sensitive application context:
+Concrete URL paths in error metadata are disabled by default because dynamic
+segments may contain personal data. Set `includeUrlPath: true` only when your
+route design makes paths safe; queries and fragments are still removed.
+Framework request spans use the parameterized `http.route` for their exported
+target and name when it is available. Cookies, authorization headers, bodies,
+and arbitrary request headers are not collected. Attribute keys, counts, and
+string sizes are bounded. Outbound span URL credentials, queries, and fragments
+are removed before export; outbound paths remain. Add only low-cardinality,
+non-sensitive application context:
 
 ```ts
 const datadog = createNextDatadogInstrumentation({
