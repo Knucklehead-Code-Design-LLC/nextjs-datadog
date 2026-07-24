@@ -99,6 +99,11 @@ request with `http.route` uses that parameterized route for its target and span
 name. Outbound paths remain observable so operators can identify a remote
 resource; applications must not place secrets or personal data in paths.
 
+The package also removes `@vercel/otel`'s `vercel.runtime` compatibility
+attribute when the application is not running on Vercel. Platform-specific
+resource attributes supplied by the application remain the authoritative host
+metadata.
+
 ## Outbound request model
 
 `@vercel/otel` owns automatic server-side fetch and Node.js HTTP(S)

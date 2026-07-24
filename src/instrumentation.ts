@@ -205,6 +205,18 @@ const isAwsAmplifyEnvironment = (environment: Environment): boolean => {
   return identityValues.some((value) => typeof value === 'string' && value.length > 0);
 };
 
+const createHostCompatibilityResourceAttributes = (
+  environment: Environment,
+): TelemetryAttributes => {
+  if (environment.VERCEL === '1') {
+    return {};
+  }
+
+  return {
+    'vercel.runtime': undefined,
+  };
+};
+
 export const detectAwsAmplifyResourceAttributes = (
   environment: Environment = process.env,
 ): Record<string, string> => {
@@ -257,6 +269,7 @@ const createOpenTelemetryConfiguration = (
     ...options.otel,
     attributes: {
       ...resourceAttributes,
+      ...createHostCompatibilityResourceAttributes(process.env),
       'deployment.environment.name': tags.env,
       env: tags.env,
       'service.name': tags.service,

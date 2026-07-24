@@ -1,4 +1,5 @@
 import { SpanStatusCode, trace, type Span } from '@opentelemetry/api';
+import type { Configuration as VercelOtelConfiguration } from '@vercel/otel';
 import type { Instrumentation } from 'next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -46,6 +47,7 @@ const createLogger = (): {
 
 afterEach(() => {
   delete process.env.NEXT_RUNTIME;
+  delete process.env.VERCEL;
   vi.restoreAllMocks();
 });
 
@@ -122,6 +124,7 @@ describe('createNextDatadogInstrumentation', () => {
           env: 'production',
           'service.name': 'checkout-web',
           'service.version': 'abcdef1',
+          'vercel.runtime': undefined,
         },
         attributesFromHeaders: {
           client: 'user-agent',
@@ -129,6 +132,25 @@ describe('createNextDatadogInstrumentation', () => {
         serviceName: 'checkout-web',
         spanProcessors: [expect.any(Object), 'auto'],
       }),
+    );
+  });
+
+  it('keeps @vercel/otel runtime metadata on Vercel', async () => {
+    process.env.VERCEL = '1';
+    const registerOpenTelemetry = vi.fn<(configuration: VercelOtelConfiguration) => void>();
+    const { logger } = createLogger();
+    const instrumentation = createNextDatadogInstrumentation({
+      env: 'production',
+      logger,
+      registerOpenTelemetry,
+      service: 'checkout-web',
+      version: 'abcdef1',
+    });
+
+    await instrumentation.register();
+
+    expect(registerOpenTelemetry.mock.calls[0]?.[0].attributes).not.toHaveProperty(
+      'vercel.runtime',
     );
   });
 
