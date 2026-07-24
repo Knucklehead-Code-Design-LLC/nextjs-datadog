@@ -188,7 +188,10 @@ export const onRequestError = datadog.onRequestError;
 ```
 
 This uses Next.js's supported instrumentation contract rather than wrapping
-route handlers individually.
+route handlers individually. Outside Vercel, the package suppresses the
+`vercel.runtime` compatibility attribute that `@vercel/otel` otherwise adds,
+so traces describe the actual hosting platform through your resource
+attributes.
 
 ### 5. Trace calls to backend services
 
