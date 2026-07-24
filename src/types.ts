@@ -19,6 +19,19 @@ export interface UnifiedServiceTags {
   version: string;
 }
 
+export interface DatadogDirectOtlpOptions {
+  /**
+   * Server-only Datadog API key. Never expose this value through a
+   * `NEXT_PUBLIC_` variable or import the instrumentation entrypoint into
+   * browser code.
+   */
+  apiKey: string;
+  /**
+   * Datadog site such as `us5.datadoghq.com`.
+   */
+  site: string;
+}
+
 export interface TraceIdentifiers {
   spanId: string;
   traceId: string;

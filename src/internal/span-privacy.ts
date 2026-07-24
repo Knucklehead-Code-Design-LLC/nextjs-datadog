@@ -5,6 +5,7 @@ type SpanProcessor = Exclude<
   string
 >;
 type StartedSpan = Parameters<SpanProcessor['onStart']>[0];
+type EndedSpan = Parameters<SpanProcessor['onEnd']>[0];
 
 const HTTP_URL_PATTERN = /https?:\/\/[^\s]+/gu;
 const MAX_SPAN_NAME_LENGTH = 512;
@@ -56,10 +57,48 @@ const sanitizeStartedSpan = (span: StartedSpan): void => {
   }
 };
 
+const sanitizeEndedSpan = (span: EndedSpan): void => {
+  const attributes = span.attributes;
+  const route = attributes['http.route'];
+  const method = attributes['http.request.method'] ?? attributes['http.method'];
+
+  if (typeof route === 'string') {
+    if (typeof attributes['http.target'] === 'string') {
+      attributes['http.target'] = sanitizeTelemetryUrl(route);
+    }
+
+    if (typeof method === 'string') {
+      (span as { name: string }).name = `${method} ${sanitizeTelemetryUrl(route)}`.slice(
+        0,
+        MAX_SPAN_NAME_LENGTH,
+      );
+    }
+  }
+
+  for (const attributeName of ['http.target', 'http.url', 'url.full']) {
+    const value = attributes[attributeName];
+    if (typeof value === 'string') {
+      attributes[attributeName] = sanitizeTelemetryUrl(value);
+    }
+  }
+
+  if (typeof attributes['url.query'] === 'string') {
+    attributes['url.query'] = '[redacted]';
+  }
+
+  (span as { name: string }).name = sanitizeTelemetrySpanName(span.name);
+};
+
 export const createTelemetryPrivacySpanProcessor = (): SpanProcessor => {
   return {
     forceFlush: () => Promise.resolve(),
-    onEnd: () => undefined,
+    onEnd: (span) => {
+      try {
+        sanitizeEndedSpan(span);
+      } catch {
+        // Privacy processing must not affect the application request.
+      }
+    },
     onStart: (span) => {
       sanitizeStartedSpan(span);
     },

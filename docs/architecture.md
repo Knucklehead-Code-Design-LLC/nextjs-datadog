@@ -15,7 +15,7 @@ Browser navigation
                  ├─ structured stdout log with trace_id + span_id
                  ├─ fetch/Axios client span
                  │    └─ allowlisted W3C propagation → backend service span
-                 └─ OTLP exporter → Collector/Agent → Datadog APM
+                 └─ OTLP exporter → Collector/Agent or direct intake → Datadog APM
 
 Amplify stdout → CloudWatch Logs → Datadog forwarding → Datadog Logs
 ```
@@ -48,18 +48,26 @@ compressed size ceiling.
 
 ## Transport ownership
 
-The package deliberately does not call a Datadog server intake:
+The portable defaults keep authenticated transport outside the package:
 
 - RUM is delivered by Datadog's official browser SDK using its public client
   token.
 - traces use `@vercel/otel` and a standard OTLP exporter configuration.
 - logs use structured `stdout`, which hosting platforms already capture.
-- a Collector, Agent, CloudWatch subscription, or other deployment integration
-  owns authenticated delivery to Datadog.
+- a Collector, Agent, CloudWatch subscription, or another deployment
+  integration normally owns authenticated delivery to Datadog.
 
-This avoids embedding server credentials, implements standard backpressure and
-retry boundaries outside short-lived Next.js requests, and keeps the package
-portable across managed hosting providers.
+Short-lived managed SSR runtimes may be unable to run or reach a Collector or
+Agent. The instrumentation entrypoint therefore offers an explicit
+`directOtlp` mode. It accepts a server-only Datadog API key and a validated
+Datadog site, replaces the timer-based automatic processor with an immediate
+processor, and sends spans to Datadog's OTLP/HTTP intake with trace-stat
+computation enabled. The credential remains confined to the server
+instrumentation entrypoint.
+
+Direct delivery trades away the Collector's stronger retry, buffering, and
+backpressure boundary. It is opt-in and intended only for constrained managed
+runtimes such as AWS Amplify SSR compute.
 
 ## Failure model
 
@@ -83,11 +91,13 @@ Custom attributes accept only primitive values, use validated keys, and are
 bounded by count and string length. Core route and request fields take
 precedence over custom attributes.
 
-A privacy processor runs before configured exporters. It removes URL
-credentials, query strings, and fragments from standard outbound URL attributes
-and URL-shaped span names, then bounds their length. Paths remain observable so
-operators can identify an outbound resource; applications must not place
-secrets or personal data in paths.
+A privacy processor runs before configured exporters and sanitizes both span
+start and completion so attributes added late by framework instrumentation are
+covered. It removes URL credentials, query strings, and fragments from standard
+URL attributes and URL-shaped span names, then bounds their length. A server
+request with `http.route` uses that parameterized route for its target and span
+name. Outbound paths remain observable so operators can identify a remote
+resource; applications must not place secrets or personal data in paths.
 
 ## Outbound request model
 
