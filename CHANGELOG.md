@@ -1,5 +1,11 @@
 # nextjs-datadog
 
+## 0.2.1
+
+### Patch Changes
+
+- a040127: Remove misleading Vercel runtime metadata from traces exported on other hosting platforms.
+
 ## 0.2.0
 
 ### Minor Changes
