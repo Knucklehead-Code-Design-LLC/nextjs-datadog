@@ -1,5 +1,11 @@
 # nextjs-datadog
 
+## 0.3.0
+
+### Minor Changes
+
+- 93c0574: Redact outbound HTTP URL paths by default, add an explicit safe-path opt-in, identify the package version on spans and logs, and document production-oriented Datadog queries and sampling behavior.
+
 ## 0.2.1
 
 ### Patch Changes
