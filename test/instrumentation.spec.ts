@@ -1,8 +1,9 @@
-import { SpanStatusCode, trace, type Span } from '@opentelemetry/api';
+import { SpanKind, SpanStatusCode, trace, type Span } from '@opentelemetry/api';
 import type { Configuration as VercelOtelConfiguration } from '@vercel/otel';
 import type { Instrumentation } from 'next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import packageMetadata from '../package.json';
 import {
   createNextDatadogInstrumentation,
   detectAwsAmplifyResourceAttributes,
@@ -124,6 +125,8 @@ describe('createNextDatadogInstrumentation', () => {
           env: 'production',
           'service.name': 'checkout-web',
           'service.version': 'abcdef1',
+          'telemetry.distro.name': 'nextjs-datadog',
+          'telemetry.distro.version': packageMetadata.version,
           'vercel.runtime': undefined,
         },
         attributesFromHeaders: {
@@ -133,6 +136,38 @@ describe('createNextDatadogInstrumentation', () => {
         spanProcessors: [expect.any(Object), 'auto'],
       }),
     );
+  });
+
+  it('allows known-safe outbound URL paths to be retained explicitly', async () => {
+    const registerOpenTelemetry = vi.fn<(configuration: VercelOtelConfiguration) => void>();
+    const { logger } = createLogger();
+    const instrumentation = createNextDatadogInstrumentation({
+      env: 'production',
+      includeOutboundUrlPath: true,
+      logger,
+      registerOpenTelemetry,
+      service: 'checkout-web',
+      version: 'abcdef1',
+    });
+
+    await instrumentation.register();
+
+    const privacyProcessor = registerOpenTelemetry.mock.calls[0]?.[0].spanProcessors?.[0];
+    const span = {
+      attributes: {
+        'http.url': 'https://api.example.com/health?token=private',
+      },
+      kind: SpanKind.CLIENT,
+      name: 'GET https://api.example.com/health?token=private',
+    };
+    if (!privacyProcessor || typeof privacyProcessor === 'string') {
+      throw new TypeError('Expected the privacy span processor');
+    }
+
+    privacyProcessor.onEnd(span as never);
+
+    expect(span.attributes['http.url']).toBe('https://api.example.com/health');
+    expect(span.name).toBe('GET https://api.example.com/health');
   });
 
   it('keeps @vercel/otel runtime metadata on Vercel', async () => {

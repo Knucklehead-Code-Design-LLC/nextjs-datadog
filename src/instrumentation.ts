@@ -5,6 +5,7 @@ import type { Configuration as VercelOtelConfiguration } from '@vercel/otel';
 import { normalizeTelemetryAttributes } from './internal/attributes';
 import { normalizeUnifiedServiceTags } from './internal/config';
 import { normalizeOutboundTracingOrigins } from './internal/outbound-tracing';
+import { TELEMETRY_DISTRO_NAME, TELEMETRY_DISTRO_VERSION } from './internal/package-metadata';
 import {
   DEFAULT_REQUEST_ID_HEADER,
   getRecordHeader,
@@ -54,6 +55,15 @@ export interface NextDatadogInstrumentationOptions extends UnifiedServiceTags {
    * @defaultValue false
    */
   instrumentEdgeRuntime?: boolean;
+  /**
+   * Include concrete URL paths on outbound HTTP client spans.
+   *
+   * Keep disabled unless every outbound path is known to exclude personal,
+   * tenant, credential, and other high-cardinality identifiers.
+   *
+   * @defaultValue false
+   */
+  includeOutboundUrlPath?: boolean;
   /**
    * Add the concrete URL path to error metadata after removing its query and
    * fragment. Keep disabled when paths can contain personal or sensitive data.
@@ -251,7 +261,9 @@ const createDefaultLogger = (
 const createSpanProcessors = (
   options: NextDatadogInstrumentationOptions,
 ): NonNullable<VercelOtelConfiguration['spanProcessors']> => {
-  const privacyProcessor = createTelemetryPrivacySpanProcessor();
+  const privacyProcessor = createTelemetryPrivacySpanProcessor({
+    includeOutboundUrlPath: options.includeOutboundUrlPath === true,
+  });
   if (!options.otel?.spanProcessors) {
     return [privacyProcessor, 'auto'];
   }
@@ -274,6 +286,8 @@ const createOpenTelemetryConfiguration = (
       env: tags.env,
       'service.name': tags.service,
       'service.version': tags.version,
+      'telemetry.distro.name': TELEMETRY_DISTRO_NAME,
+      'telemetry.distro.version': TELEMETRY_DISTRO_VERSION,
     },
     serviceName: tags.service,
     spanProcessors: createSpanProcessors(options),

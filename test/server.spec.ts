@@ -1,6 +1,7 @@
 import { context, ROOT_CONTEXT, trace, type Span, type SpanContext } from '@opentelemetry/api';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import packageMetadata from '../package.json';
 import {
   createDatadogLogger,
   getActiveTraceIdentifiers,
@@ -46,6 +47,8 @@ describe('createDatadogLogger', () => {
         infinite: Number.POSITIVE_INFINITY,
         message: 'cannot override',
         'request.id': 'req_123',
+        'telemetry.distro.name': 'cannot override',
+        'telemetry.distro.version': 'cannot override',
       },
       error,
     });
@@ -62,6 +65,8 @@ describe('createDatadogLogger', () => {
       service: 'checkout-web',
       span_id: SPAN_ID,
       status: 'error',
+      'telemetry.distro.name': 'nextjs-datadog',
+      'telemetry.distro.version': packageMetadata.version,
       timestamp: '2026-07-22T12:00:00.000Z',
       trace_id: TRACE_ID,
       version: 'abcdef1',

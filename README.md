@@ -215,6 +215,25 @@ adds them to `@vercel/otel`'s public `propagateContextUrls` configuration.
 Requests to other hosts still receive client spans, but they do not receive
 `traceparent` or `tracestate` headers from this allowlist.
 
+Outbound client span paths are redacted by default. The remote origin, method,
+status, duration, parent/child relationship, and failure state remain
+available, while URL attributes and URL-shaped span names use
+`/[redacted]`. This prevents entity IDs, tenant names, slugs, and other
+high-cardinality path values from becoming span resource names.
+
+Set `includeOutboundUrlPath: true` only when every outbound path is designed to
+be low-cardinality and free of personal, tenant, credential, or other sensitive
+values:
+
+```ts
+const datadog = createNextDatadogInstrumentation({
+  env: process.env.DD_ENV!,
+  includeOutboundUrlPath: true,
+  service: process.env.DD_SERVICE!,
+  version: process.env.DD_VERSION!,
+});
+```
+
 This option applies only to requests made by the Next.js server. For browser
 requests sent directly to a cross-origin backend, add an object with
 `propagatorTypes: ['tracecontext']` to the RUM `allowedTracingUrls` option and
@@ -229,9 +248,9 @@ custom fetch attributes. Those rules are composed with
 
 Before export, the package's privacy span processor removes URL credentials,
 query strings, and fragments from standard URL attributes and URL-shaped span
-names. It also bounds their length. URL paths remain because they identify
-outbound resources, so keep sensitive values out of paths. The processor is
-prepended to any processors supplied through `otel.spanProcessors`.
+names. It also bounds their length and redacts outbound client paths unless
+they are explicitly enabled. The processor is prepended to any processors
+supplied through `otel.spanProcessors`.
 
 ### 6. Propagate a request ID
 
@@ -342,19 +361,20 @@ NEXT_PUBLIC_DD_VERSION=<same deployed commit SHA>
 
 The server error hook records:
 
-| Field                         | Source                                    |
-| ----------------------------- | ----------------------------------------- |
-| `http.request.method`         | Next.js request metadata                  |
-| `http.route`                  | Parameterized Next.js route               |
-| `url.path`                    | Optional path with query/fragment removed |
-| `nextjs.router_kind`          | App Router or Pages Router                |
-| `nextjs.route_type`           | Render, route, action, or proxy           |
-| `nextjs.render_source`        | Next.js render source, if set             |
-| `nextjs.revalidate_reason`    | Revalidation reason, if set               |
-| `request.id`                  | Configured request-ID header              |
-| `trace_id` / `span_id`        | Active OpenTelemetry context              |
-| `error.digest`                | Next.js error digest, if set              |
-| `service` / `env` / `version` | Unified service tags                      |
+| Field                         | Source                                     |
+| ----------------------------- | ------------------------------------------ |
+| `http.request.method`         | Next.js request metadata                   |
+| `http.route`                  | Parameterized Next.js route                |
+| `url.path`                    | Optional path with query/fragment removed  |
+| `nextjs.router_kind`          | App Router or Pages Router                 |
+| `nextjs.route_type`           | Render, route, action, or proxy            |
+| `nextjs.render_source`        | Next.js render source, if set              |
+| `nextjs.revalidate_reason`    | Revalidation reason, if set                |
+| `request.id`                  | Configured request-ID header               |
+| `trace_id` / `span_id`        | Active OpenTelemetry context               |
+| `error.digest`                | Next.js error digest, if set               |
+| `service` / `env` / `version` | Unified service tags                       |
+| `telemetry.distro.*`          | Package name and installed package version |
 
 Concrete URL paths in error metadata are disabled by default because dynamic
 segments may contain personal data. Set `includeUrlPath: true` only when your
@@ -362,8 +382,8 @@ route design makes paths safe; queries and fragments are still removed.
 Framework request spans use the parameterized `http.route` for their exported
 target and name when it is available. Cookies, authorization headers, bodies,
 and arbitrary request headers are not collected. Attribute keys, counts, and
-string sizes are bounded. Outbound span URL credentials, queries, and fragments
-are removed before export; outbound paths remain. Add only low-cardinality,
+string sizes are bounded. Outbound span URL credentials, queries, fragments,
+and paths are removed before export by default. Add only low-cardinality,
 non-sensitive application context:
 
 ```ts
@@ -428,6 +448,17 @@ server spans. This package does not create a separate metrics protocol for
 those APM views. Application-specific metrics remain the responsibility of the
 application's metrics SDK or OpenTelemetry metric reader.
 
+The package adds `telemetry.distro.name:nextjs-datadog` and
+`telemetry.distro.version:<installed version>` to spans and structured logs.
+These identify the library version separately from the application's unified
+`version` tag.
+
+An error log can contain valid `trace_id` and `span_id` fields while its Trace
+tab shows no retained trace. Datadog trace sampling, retention, and indexed-span
+selection occur after context creation; that result does not by itself indicate
+broken propagation. See [Datadog investigation queries](docs/datadog-queries.md)
+for field-coverage, phase, correlation, failure, and cardinality checks.
+
 ## Runtime boundaries
 
 Import from the narrowest entrypoint:
@@ -444,6 +475,7 @@ the generated client entrypoint.
 ## Documentation
 
 - [Architecture and data flow](docs/architecture.md)
+- [Datadog investigation queries](docs/datadog-queries.md)
 - [Release process](docs/releasing.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
