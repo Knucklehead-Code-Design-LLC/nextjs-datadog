@@ -2,6 +2,7 @@ import { context, isSpanContextValid, trace } from '@opentelemetry/api';
 
 import { normalizeTelemetryAttributes } from './internal/attributes';
 import { normalizeUnifiedServiceTags } from './internal/config';
+import { TELEMETRY_DISTRO_NAME, TELEMETRY_DISTRO_VERSION } from './internal/package-metadata';
 import type {
   TelemetryAttributes,
   TelemetryAttributeValue,
@@ -28,6 +29,8 @@ const RESERVED_LOG_KEYS = new Set([
   'service',
   'span_id',
   'status',
+  'telemetry.distro.name',
+  'telemetry.distro.version',
   'timestamp',
   'trace_id',
   'version',
@@ -51,6 +54,8 @@ export interface DatadogLogRecord {
   service: string;
   span_id?: string;
   status: DatadogLogLevel;
+  'telemetry.distro.name'?: string;
+  'telemetry.distro.version'?: string;
   timestamp: string;
   trace_id?: string;
   version: string;
@@ -240,6 +245,8 @@ const createLogRecord = (
     message: message.slice(0, MAX_LOG_MESSAGE_LENGTH),
     service: dependencies.tags.service,
     status: level,
+    'telemetry.distro.name': TELEMETRY_DISTRO_NAME,
+    'telemetry.distro.version': TELEMETRY_DISTRO_VERSION,
     timestamp: dependencies.clock().toISOString(),
     version: dependencies.tags.version,
   };

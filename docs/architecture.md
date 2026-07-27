@@ -27,6 +27,8 @@ Correlations use multiple durable keys:
   explicitly accept W3C Trace Context.
 - OpenTelemetry `trace_id` and `span_id` link server logs to the active trace.
 - unified `service`, `env`, and `version` values align browser and server data.
+- `telemetry.distro.name` and `telemetry.distro.version` identify the installed
+  integration separately from the application's deployable version.
 - `error.digest` links a redacted Server Component error in RUM to its full
   server-side error.
 - `request.id` follows the request even when a trace is not sampled.
@@ -95,9 +97,10 @@ A privacy processor runs before configured exporters and sanitizes both span
 start and completion so attributes added late by framework instrumentation are
 covered. It removes URL credentials, query strings, and fragments from standard
 URL attributes and URL-shaped span names, then bounds their length. A server
-request with `http.route` uses that parameterized route for its target and span
-name. Outbound paths remain observable so operators can identify a remote
-resource; applications must not place secrets or personal data in paths.
+request with `http.route` uses that parameterized route for its target, URL path,
+and span name. Outbound client paths are replaced with the stable
+`/[redacted]` placeholder by default; applications can explicitly retain only
+paths they know are low-cardinality and non-sensitive.
 
 The package also removes `@vercel/otel`'s `vercel.runtime` compatibility
 attribute when the application is not running on Vercel. Platform-specific
