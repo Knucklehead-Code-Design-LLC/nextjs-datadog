@@ -1,5 +1,11 @@
 # nextjs-datadog
 
+## 0.3.1
+
+### Patch Changes
+
+- a6b314b: Redact relative outbound and raw inbound HTTP paths in span names and URL attributes by default, preserve parameterized inbound routes, and contain privacy-processing failures at span start.
+
 ## 0.3.0
 
 ### Minor Changes
