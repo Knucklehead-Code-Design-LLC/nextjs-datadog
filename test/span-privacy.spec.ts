@@ -44,6 +44,12 @@ describe('telemetry span privacy', () => {
     ).toBe('http GET https://api.example.com/orders/123');
   });
 
+  it('sanitizes relative HTTP targets embedded in span names', () => {
+    expect(sanitizeTelemetrySpanName('http GET /orders/123?token=private#details')).toBe(
+      'http GET /orders/123',
+    );
+  });
+
   it('bounds unusually large span names and URL attributes', () => {
     expect(sanitizeTelemetrySpanName('s'.repeat(1_000))).toHaveLength(512);
     expect(sanitizeTelemetryUrl(`/${'p'.repeat(3_000)}`)).toHaveLength(2_048);
@@ -100,6 +106,46 @@ describe('telemetry span privacy', () => {
     expect(setAttribute).toHaveBeenCalledWith('http.url', 'https://api.example.com/[redacted]');
     expect(setAttribute).toHaveBeenCalledWith('url.full', 'https://api.example.com/[redacted]');
     expect(setAttribute).toHaveBeenCalledWith('url.path', '/[redacted]');
+  });
+
+  it('redacts inbound server paths before other processors observe them', () => {
+    const setAttribute = vi.fn();
+    const updateName = vi.fn();
+    const processor = createTelemetryPrivacySpanProcessor();
+    const span = {
+      attributes: {
+        'http.route': '/orders/[id]',
+        'http.target': '/orders/customer@example.com?token=private',
+        'url.full': 'https://app.example.com/orders/customer@example.com?token=private',
+        'url.path': '/orders/customer@example.com',
+      },
+      kind: SpanKind.SERVER,
+      name: 'GET /orders/customer@example.com?token=private',
+      setAttribute,
+      updateName,
+    };
+
+    processor.onStart(span as never, {} as never);
+
+    expect(updateName).toHaveBeenCalledWith('GET /[redacted]');
+    expect(setAttribute).toHaveBeenCalledWith('http.target', '/[redacted]');
+    expect(setAttribute).toHaveBeenCalledWith('url.full', 'https://app.example.com/[redacted]');
+    expect(setAttribute).toHaveBeenCalledWith('url.path', '/[redacted]');
+  });
+
+  it('redacts relative outbound client paths in span names before other processors observe them', () => {
+    const updateName = vi.fn();
+    const processor = createTelemetryPrivacySpanProcessor();
+    const span = {
+      attributes: {},
+      kind: SpanKind.CLIENT,
+      name: 'http GET /orders/customer@example.com?token=private',
+      updateName,
+    };
+
+    processor.onStart(span as never, {} as never);
+
+    expect(updateName).toHaveBeenCalledWith('http GET /[redacted]');
   });
 
   it('redacts URL attributes added to outbound client spans after start', () => {
@@ -169,12 +215,35 @@ describe('telemetry span privacy', () => {
         'http.method': 'GET',
         'http.route': '/orders/[id]',
         'http.target': '/orders/[id]',
-        'http.url': 'https://example.com/orders/customer@example.com',
+        'http.url': 'https://example.com/[redacted]',
         'url.path': '/orders/[id]',
         'url.query': '[redacted]',
       },
       kind: SpanKind.SERVER,
       name: 'GET /orders/[id]',
+    });
+  });
+
+  it('uses the parameterized route when a server span does not expose its method', () => {
+    const processor = createTelemetryPrivacySpanProcessor();
+    const span = {
+      attributes: {
+        'http.route': '/orders/[id]',
+        'http.target': '/orders/customer@example.com?token=private',
+      },
+      kind: SpanKind.SERVER,
+      name: 'GET /orders/customer@example.com?token=private',
+    };
+
+    processor.onEnd(span as never);
+
+    expect(span).toEqual({
+      attributes: {
+        'http.route': '/orders/[id]',
+        'http.target': '/orders/[id]',
+      },
+      kind: SpanKind.SERVER,
+      name: '/orders/[id]',
     });
   });
 
@@ -185,12 +254,15 @@ describe('telemetry span privacy', () => {
     });
     const span = provider
       .getTracer('privacy-test')
-      .startSpan('GET /orders/customer@example.com?token=private');
+      .startSpan('GET /orders/customer@example.com?token=private', {
+        kind: SpanKind.SERVER,
+      });
 
     span.setAttributes({
       'http.method': 'GET',
       'http.route': '/orders/[id]',
       'http.target': '/orders/customer@example.com?token=private',
+      'url.full': 'https://app.example.com/orders/customer@example.com?token=private',
       'url.query': 'token=private',
     });
     span.end();
@@ -198,6 +270,7 @@ describe('telemetry span privacy', () => {
     const exportedSpan = exporter.getFinishedSpans()[0];
     expect(exportedSpan?.name).toBe('GET /orders/[id]');
     expect(exportedSpan?.attributes['http.target']).toBe('/orders/[id]');
+    expect(exportedSpan?.attributes['url.full']).toBe('https://app.example.com/[redacted]');
     expect(exportedSpan?.attributes['url.query']).toBe('[redacted]');
 
     await provider.shutdown();
@@ -232,6 +305,59 @@ describe('telemetry span privacy', () => {
     await provider.shutdown();
   });
 
+  it('exports relative outbound client span names without concrete path identifiers by default', async () => {
+    const exporter = new InMemorySpanExporter();
+    const provider = new BasicTracerProvider({
+      spanProcessors: [createTelemetryPrivacySpanProcessor(), new SimpleSpanProcessor(exporter)],
+    });
+    const span = provider
+      .getTracer('privacy-test')
+      .startSpan('GET /orders/customer@example.com?token=private', {
+        kind: SpanKind.CLIENT,
+      });
+
+    span.end();
+
+    expect(exporter.getFinishedSpans()[0]?.name).toBe('GET /[redacted]');
+
+    await provider.shutdown();
+  });
+
+  it('exports route-less server spans without concrete path identifiers by default', async () => {
+    const exporter = new InMemorySpanExporter();
+    const provider = new BasicTracerProvider({
+      spanProcessors: [createTelemetryPrivacySpanProcessor(), new SimpleSpanProcessor(exporter)],
+    });
+    const span = provider
+      .getTracer('privacy-test')
+      .startSpan('GET /orders/customer@example.com?token=private', {
+        attributes: {
+          'http.target': '/orders/customer@example.com?token=private',
+          'url.full': 'https://app.example.com/orders/customer@example.com?token=private',
+          'url.path': '/orders/customer@example.com',
+        },
+        kind: SpanKind.SERVER,
+      });
+
+    span.end();
+
+    const exportedSpan = exporter.getFinishedSpans()[0];
+    expect(exportedSpan?.name).toBe('GET /[redacted]');
+    expect(exportedSpan?.attributes).toMatchObject({
+      'http.target': '/[redacted]',
+      'url.full': 'https://app.example.com/[redacted]',
+      'url.path': '/[redacted]',
+    });
+    expect(
+      JSON.stringify({
+        attributes: exportedSpan?.attributes,
+        name: exportedSpan?.name,
+      }),
+    ).not.toContain('customer@example.com');
+
+    await provider.shutdown();
+  });
+
   it('contains sanitization failures during span completion', () => {
     const processor = createTelemetryPrivacySpanProcessor();
     const span = {
@@ -242,5 +368,18 @@ describe('telemetry span privacy', () => {
     };
 
     expect(() => processor.onEnd(span as never)).not.toThrow();
+  });
+
+  it('contains sanitization failures when a span starts', () => {
+    const processor = createTelemetryPrivacySpanProcessor();
+    const span = {
+      attributes: Object.freeze({
+        'url.query': 'token=private',
+      }),
+      kind: SpanKind.CLIENT,
+      name: 'GET /orders?token=private',
+    };
+
+    expect(() => processor.onStart(span as never, {} as never)).not.toThrow();
   });
 });
