@@ -217,9 +217,9 @@ Requests to other hosts still receive client spans, but they do not receive
 
 Outbound client span paths are redacted by default. The remote origin, method,
 status, duration, parent/child relationship, and failure state remain
-available, while URL attributes and URL-shaped span names use
-`/[redacted]`. This prevents entity IDs, tenant names, slugs, and other
-high-cardinality path values from becoming span resource names.
+available, while URL attributes and absolute or relative HTTP targets in span
+names use `/[redacted]`. This prevents entity IDs, tenant names, slugs, and
+other high-cardinality path values from becoming span resource names.
 
 Set `includeOutboundUrlPath: true` only when every outbound path is designed to
 be low-cardinality and free of personal, tenant, credential, or other sensitive
@@ -251,6 +251,11 @@ query strings, and fragments from standard URL attributes and URL-shaped span
 names. It also bounds their length and redacts outbound client paths unless
 they are explicitly enabled. The processor is prepended to any processors
 supplied through `otel.spanProcessors`.
+
+Incoming server spans are also protected before other span processors observe
+them. When Next.js provides its parameterized `http.route`, the completed span
+uses that route for its name and path attributes. Route-less server spans keep
+the stable `/[redacted]` placeholder instead of exporting a concrete path.
 
 ### 6. Propagate a request ID
 
@@ -383,8 +388,9 @@ Framework request spans use the parameterized `http.route` for their exported
 target and name when it is available. Cookies, authorization headers, bodies,
 and arbitrary request headers are not collected. Attribute keys, counts, and
 string sizes are bounded. Outbound span URL credentials, queries, fragments,
-and paths are removed before export by default. Add only low-cardinality,
-non-sensitive application context:
+and paths are removed before export by default. Inbound URLs are redacted until
+Next.js supplies a parameterized route, and route-less server spans stay
+redacted. Add only low-cardinality, non-sensitive application context:
 
 ```ts
 const datadog = createNextDatadogInstrumentation({

@@ -96,11 +96,13 @@ precedence over custom attributes.
 A privacy processor runs before configured exporters and sanitizes both span
 start and completion so attributes added late by framework instrumentation are
 covered. It removes URL credentials, query strings, and fragments from standard
-URL attributes and URL-shaped span names, then bounds their length. A server
-request with `http.route` uses that parameterized route for its target, URL path,
-and span name. Outbound client paths are replaced with the stable
-`/[redacted]` placeholder by default; applications can explicitly retain only
-paths they know are low-cardinality and non-sensitive.
+URL attributes and absolute or relative HTTP targets in span names, then bounds
+their length. A server request with `http.route` uses that parameterized route
+for its target, URL path, and span name. Raw inbound paths are redacted before
+other processors see them; route-less server spans retain the stable
+`/[redacted]` placeholder. Outbound client paths are also replaced with that
+placeholder by default; applications can explicitly retain only paths they know
+are low-cardinality and non-sensitive.
 
 The package also removes `@vercel/otel`'s `vercel.runtime` compatibility
 attribute when the application is not running on Vercel. Platform-specific
