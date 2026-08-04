@@ -1,9 +1,16 @@
-import { context as otelContext, SpanStatusCode, trace, type Span } from '@opentelemetry/api';
+import {
+  context as otelContext,
+  isSpanContextValid,
+  SpanStatusCode,
+  trace,
+  type Span,
+} from '@opentelemetry/api';
 import type { Instrumentation } from 'next';
 import type { Configuration as VercelOtelConfiguration } from '@vercel/otel';
 
 import { normalizeTelemetryAttributes } from './internal/attributes';
 import { normalizeUnifiedServiceTags } from './internal/config';
+import { transformSerializedError } from './internal/error';
 import { normalizeOutboundTracingOrigins } from './internal/outbound-tracing';
 import { TELEMETRY_DISTRO_NAME, TELEMETRY_DISTRO_VERSION } from './internal/package-metadata';
 import {
@@ -13,6 +20,7 @@ import {
   normalizeRequestId,
   stripQueryAndFragment,
 } from './internal/request';
+import { withSerializedError } from './internal/serialized-log-error';
 import { createTelemetryPrivacySpanProcessor } from './internal/span-privacy';
 import {
   createDatadogLogger,
@@ -21,12 +29,22 @@ import {
   type DatadogLogger,
   type SerializedError,
 } from './server';
-import type { DatadogDirectOtlpOptions, TelemetryAttributes, UnifiedServiceTags } from './types';
+import type {
+  DatadogDirectOtlpOptions,
+  TelemetryAttributes,
+  TraceIdentifiers,
+  UnifiedServiceTags,
+} from './types';
 import { registerDirectDatadogOtlp, type RegisterOpenTelemetry } from './internal/direct-otlp';
 
 type RequestError = Parameters<Instrumentation.onRequestError>[0];
 type RequestErrorRequest = Parameters<Instrumentation.onRequestError>[1];
 type RequestErrorContext = Parameters<Instrumentation.onRequestError>[2];
+
+export type NextDatadogRequestPathFormatter = (
+  pathname: string,
+  context: Readonly<RequestErrorContext>,
+) => string | undefined | Promise<string | undefined>;
 
 export interface NextDatadogRequestError {
   attributes: Readonly<Record<string, boolean | number | string>>;
@@ -43,6 +61,17 @@ export interface NextDatadogInstrumentationOptions extends UnifiedServiceTags {
    * OpenTelemetry Collector or Datadog Agent.
    */
   directOtlp?: DatadogDirectOtlpOptions;
+  /**
+   * Derive a safe Content value for a request-error log from its serialized,
+   * redacted error. The default includes only the error kind.
+   */
+  formatRequestErrorMessage?: (error: Readonly<SerializedError>) => string;
+  /**
+   * Selectively retain a safe concrete path in request-error metadata. The
+   * formatter receives a query- and fragment-free pathname and may return
+   * `undefined` to omit it. Its result replaces `includeUrlPath` when set.
+   */
+  formatRequestPath?: NextDatadogRequestPathFormatter;
   /**
    * Add low-cardinality application attributes after authentication or routing.
    */
@@ -91,6 +120,10 @@ export interface NextDatadogInstrumentationOptions extends UnifiedServiceTags {
   registerOpenTelemetry?: RegisterOpenTelemetry;
   requestIdHeader?: string;
   resourceAttributes?: TelemetryAttributes;
+  /**
+   * Redact an error before it is added to request-error log Content, log
+   * fields, and span exception/status data.
+   */
   transformError?: (error: Readonly<SerializedError>) => SerializedError;
 }
 
@@ -102,6 +135,8 @@ export interface NextDatadogInstrumentation {
 type Environment = Readonly<Record<string, string | undefined>>;
 
 const CUSTOM_REQUEST_ATTRIBUTE_LIMIT = 48;
+const MAX_REQUEST_ERROR_MESSAGE_LENGTH = 4_096;
+const REQUEST_ERROR_MESSAGE_PREFIX = 'Next.js request failed';
 const REQUEST_ATTRIBUTE_KEYS = new Set([
   'error.digest',
   'http.request.method',
@@ -116,32 +151,31 @@ const REQUEST_ATTRIBUTE_KEYS = new Set([
 
 const setSpanError = (
   span: Span | undefined,
-  error: RequestError,
+  error: Readonly<SerializedError>,
   attributes: Readonly<Record<string, boolean | number | string>>,
 ): void => {
   if (!span) {
     return;
   }
 
-  const serializedError = serializeError(error);
   const exception: {
     message: string;
     name: string;
     stack?: string;
   } = {
-    message: serializedError.message,
-    name: serializedError.kind,
+    message: error.message,
+    name: error.kind,
   };
 
-  if (serializedError.stack) {
-    exception.stack = serializedError.stack;
+  if (error.stack) {
+    exception.stack = error.stack;
   }
 
   span.recordException(exception);
   span.setAttributes(attributes);
   span.setStatus({
     code: SpanStatusCode.ERROR,
-    message: serializedError.message,
+    message: error.message,
   });
 };
 
@@ -149,7 +183,7 @@ const createRequestAttributes = (
   request: RequestErrorRequest,
   requestContext: RequestErrorContext,
   requestIdHeader: string,
-  includeUrlPath: boolean,
+  urlPath: string | undefined,
 ): TelemetryAttributes => {
   const requestId = normalizeRequestId(getRecordHeader(request.headers, requestIdHeader));
   const attributes: Record<string, boolean | number | string | undefined> = {
@@ -165,21 +199,20 @@ const createRequestAttributes = (
     attributes['request.id'] = requestId;
   }
 
-  if (includeUrlPath) {
-    attributes['url.path'] = stripQueryAndFragment(request.path);
+  if (urlPath) {
+    attributes['url.path'] = urlPath;
   }
 
   return attributes;
 };
 
-const createErrorAttributes = (error: RequestError): TelemetryAttributes => {
-  const serializedError = serializeError(error);
-  if (!serializedError.digest) {
+const createErrorAttributes = (error: Readonly<SerializedError>): TelemetryAttributes => {
+  if (!error.digest) {
     return {};
   }
 
   return {
-    'error.digest': serializedError.digest,
+    'error.digest': error.digest,
   };
 };
 
@@ -197,6 +230,127 @@ const writeDiagnostic = (
     });
   } catch {
     // A diagnostic failure must never affect the application error path.
+  }
+};
+
+const getTraceIdentifiers = (span: Span | undefined): TraceIdentifiers | undefined => {
+  if (!span) {
+    return undefined;
+  }
+
+  try {
+    const spanContext = span.spanContext();
+    if (!isSpanContextValid(spanContext)) {
+      return undefined;
+    }
+
+    return {
+      spanId: spanContext.spanId,
+      traceId: spanContext.traceId,
+    };
+  } catch {
+    return undefined;
+  }
+};
+
+const captureRequestTrace = (
+  logger: Pick<DatadogLogger, 'warn'>,
+): {
+  activeSpan: Span | undefined;
+  traceIdentifiers: TraceIdentifiers | undefined;
+} => {
+  try {
+    const activeSpan = trace.getSpan(otelContext.active());
+    return {
+      activeSpan,
+      traceIdentifiers: getTraceIdentifiers(activeSpan),
+    };
+  } catch (error) {
+    writeDiagnostic(logger, 'trace_capture', error);
+    return {
+      activeSpan: undefined,
+      traceIdentifiers: undefined,
+    };
+  }
+};
+
+const normalizeRequestPath = (pathname: unknown): string | undefined => {
+  if (typeof pathname !== 'string' || pathname.length === 0) {
+    return undefined;
+  }
+
+  const normalizedPath = stripQueryAndFragment(pathname);
+  if (!normalizedPath.startsWith('/')) {
+    return undefined;
+  }
+
+  return normalizedPath;
+};
+
+const getRequestPath = async (
+  options: NextDatadogInstrumentationOptions,
+  request: RequestErrorRequest,
+  requestContext: RequestErrorContext,
+  logger: Pick<DatadogLogger, 'warn'>,
+): Promise<string | undefined> => {
+  const pathname = stripQueryAndFragment(request.path);
+  if (!options.formatRequestPath) {
+    if (options.includeUrlPath === true) {
+      return pathname;
+    }
+
+    return undefined;
+  }
+
+  try {
+    return normalizeRequestPath(await options.formatRequestPath(pathname, requestContext));
+  } catch (error) {
+    writeDiagnostic(logger, 'request_path', error);
+    return undefined;
+  }
+};
+
+const getSerializedRequestError = (
+  options: NextDatadogInstrumentationOptions,
+  error: RequestError,
+  logger: Pick<DatadogLogger, 'warn'>,
+): SerializedError => {
+  const serializedError = serializeError(error);
+  if (!options.transformError) {
+    return serializedError;
+  }
+
+  try {
+    return transformSerializedError(serializedError, options.transformError);
+  } catch (transformError) {
+    writeDiagnostic(logger, 'error_transformation', transformError);
+    return {
+      kind: 'Error',
+      message: '[error redacted because transformation failed]',
+    };
+  }
+};
+
+const getRequestErrorMessage = (
+  options: NextDatadogInstrumentationOptions,
+  error: Readonly<SerializedError>,
+  logger: Pick<DatadogLogger, 'warn'>,
+): string => {
+  const fallback = `${REQUEST_ERROR_MESSAGE_PREFIX}: ${error.kind}`;
+  if (!options.formatRequestErrorMessage) {
+    return fallback;
+  }
+
+  try {
+    const message = options.formatRequestErrorMessage(error);
+    if (typeof message === 'string' && message.length > 0) {
+      return message.slice(0, MAX_REQUEST_ERROR_MESSAGE_LENGTH);
+    }
+
+    return fallback;
+  } catch (formatError) {
+    writeDiagnostic(logger, 'request_error_message', formatError);
+    return fallback;
   }
 };
 
@@ -374,25 +528,23 @@ const createOnRequestError = (
   requestIdHeader: string,
 ): Instrumentation.onRequestError => {
   return async (error, request, requestContext) => {
+    const { activeSpan, traceIdentifiers } = captureRequestTrace(logger);
     const baseRequestError = {
       context: requestContext,
       error,
       request,
     };
     const customAttributes = await getCustomRequestAttributes(options, baseRequestError, logger);
+    const urlPath = await getRequestPath(options, request, requestContext, logger);
     const normalizedCustomAttributes = normalizeTelemetryAttributes(customAttributes, {
       attributeLimit: CUSTOM_REQUEST_ATTRIBUTE_LIMIT,
       reservedKeys: REQUEST_ATTRIBUTE_KEYS,
     });
     const requestAttributes = normalizeTelemetryAttributes(
-      createRequestAttributes(
-        request,
-        requestContext,
-        requestIdHeader,
-        options.includeUrlPath === true,
-      ),
+      createRequestAttributes(request, requestContext, requestIdHeader, urlPath),
     );
-    const errorAttributes = normalizeTelemetryAttributes(createErrorAttributes(error));
+    const serializedError = getSerializedRequestError(options, error, logger);
+    const errorAttributes = normalizeTelemetryAttributes(createErrorAttributes(serializedError));
     const attributes = {
       ...normalizedCustomAttributes,
       ...requestAttributes,
@@ -404,16 +556,23 @@ const createOnRequestError = (
     };
 
     try {
-      setSpanError(trace.getSpan(otelContext.active()), error, attributes);
+      setSpanError(activeSpan, serializedError, attributes);
     } catch (spanError) {
       writeDiagnostic(logger, 'span_enrichment', spanError);
     }
 
     try {
-      logger.error('Next.js request failed', {
-        attributes,
-        error,
-      });
+      const logDetails = withSerializedError(
+        {
+          attributes,
+          error,
+        },
+        serializedError,
+      );
+      if (traceIdentifiers) {
+        logDetails.traceIdentifiers = traceIdentifiers;
+      }
+      logger.error(getRequestErrorMessage(options, serializedError, logger), logDetails);
     } catch (logError) {
       writeDiagnostic(logger, 'error_log', logError);
     }

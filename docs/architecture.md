@@ -26,6 +26,8 @@ Correlations use multiple durable keys:
 - exact-origin outbound propagation links the Next.js request to services that
   explicitly accept W3C Trace Context.
 - OpenTelemetry `trace_id` and `span_id` link server logs to the active trace.
+  Request-error reporting snapshots valid identifiers before optional async
+  metadata work so that work cannot erase its own correlation.
 - unified `service`, `env`, and `version` values align browser and server data.
 - `telemetry.distro.name` and `telemetry.distro.version` identify the installed
   integration separately from the application's deployable version.
@@ -86,8 +88,11 @@ Datadog intake layers.
 
 Only documented framework metadata is collected. Concrete URL paths are
 disabled by default; when explicitly enabled, query strings and fragments are
-removed. No cookies, authorization values, bodies, or arbitrary headers are
-collected.
+removed. `formatRequestPath` provides a narrower error-metadata opt-in: it
+receives a query- and fragment-free pathname, and may return selected safe
+segments or omit the field. Its result does not change the privacy policy for
+ordinary inbound spans. No cookies, authorization values, bodies, or arbitrary
+headers are collected.
 
 Custom attributes accept only primitive values, use validated keys, and are
 bounded by count and string length. Core route and request fields take
@@ -103,6 +108,13 @@ other processors see them; route-less server spans retain the stable
 `/[redacted]` placeholder. Outbound client paths are also replaced with that
 placeholder by default; applications can explicitly retain only paths they know
 are low-cardinality and non-sensitive.
+
+Request-error log Content contains the bounded error kind by default. An
+application can combine `transformError` with `formatRequestErrorMessage` to
+show an approved, redacted diagnostic in Content. The transformed error is used
+once for Content, structured error fields, and span exception/status data when
+using the package logger; an injected custom logger owns its serialization and
+redaction policy.
 
 The package also removes `@vercel/otel`'s `vercel.runtime` compatibility
 attribute when the application is not running on Vercel. Platform-specific
