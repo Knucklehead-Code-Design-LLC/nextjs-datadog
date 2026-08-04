@@ -157,6 +157,53 @@ describe('createDatadogLogger', () => {
     expect(Object.keys(record).filter((key) => key.startsWith('valid.'))).toHaveLength(64);
   });
 
+  it('uses explicit trace identifiers when a caller has crossed an async boundary', () => {
+    const write = vi.fn();
+    const logger = createDatadogLogger({
+      env: 'test',
+      getTraceIdentifiers: () => undefined,
+      service: 'web',
+      version: '1',
+      write,
+    });
+
+    logger.error('request failed', {
+      traceIdentifiers: {
+        spanId: SPAN_ID,
+        traceId: TRACE_ID,
+      },
+    });
+
+    expect(write.mock.calls[0]?.[1]).toMatchObject({
+      span_id: SPAN_ID,
+      trace_id: TRACE_ID,
+    });
+  });
+
+  it('does not replace an invalid explicit trace snapshot with active context', () => {
+    const write = vi.fn();
+    const logger = createDatadogLogger({
+      env: 'test',
+      getTraceIdentifiers: () => ({
+        spanId: SPAN_ID,
+        traceId: TRACE_ID,
+      }),
+      service: 'web',
+      version: '1',
+      write,
+    });
+
+    logger.error('request failed', {
+      traceIdentifiers: {
+        spanId: 'invalid',
+        traceId: 'invalid',
+      },
+    });
+
+    expect(write.mock.calls[0]?.[1]).not.toHaveProperty('span_id');
+    expect(write.mock.calls[0]?.[1]).not.toHaveProperty('trace_id');
+  });
+
   it('contains failures from telemetry callbacks', () => {
     const onWriteError = vi.fn(() => {
       throw new Error('secondary failure');

@@ -54,6 +54,7 @@ Then add one field at a time to measure coverage:
 @request.id:*
 @error.kind:*
 @error.digest:*
+@url.path:*
 trace_id:*
 span_id:*
 ```
@@ -64,6 +65,11 @@ and revalidation failures that are present in the deployment. A zero count for
 a lifecycle type is evidence only that no matching failure log was ingested in
 the selected window; normal successful execution does not call
 `onRequestError`.
+
+Request-error Content starts with `Next.js request failed:` and includes the
+bounded error kind by default. If the application has configured a redacted
+`formatRequestErrorMessage`, grouping by Content can distinguish its approved
+failure classes without exposing the raw error message.
 
 Retries, timeouts, and cancellations are owned by the framework or downstream
 client instrumentation. Inspect failed client spans and their error attributes
@@ -89,7 +95,8 @@ Log forwarding and trace intake have independent sampling, retention, indexing,
 and delivery paths. Distinguish the cases as follows:
 
 - missing `trace_id` or `span_id` on the log: no valid active span was available
-  when the log was written;
+  when the hook started; the package snapshots valid IDs before optional async
+  request metadata callbacks;
 - identifiers present but no retained trace: inspect trace sampling, retention,
   indexed-span filters, and exporter health;
 - a retained trace with orphan spans: inspect W3C extraction and propagation,

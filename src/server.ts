@@ -2,7 +2,14 @@ import { context, isSpanContextValid, trace } from '@opentelemetry/api';
 
 import { normalizeTelemetryAttributes } from './internal/attributes';
 import { normalizeUnifiedServiceTags } from './internal/config';
+import {
+  serializeError,
+  transformSerializedError,
+  type SerializedError,
+  type TransformError,
+} from './internal/error';
 import { TELEMETRY_DISTRO_NAME, TELEMETRY_DISTRO_VERSION } from './internal/package-metadata';
+import { getSerializedError } from './internal/serialized-log-error';
 import type {
   TelemetryAttributes,
   TelemetryAttributeValue,
@@ -10,10 +17,6 @@ import type {
   UnifiedServiceTags,
 } from './types';
 
-const MAX_ERROR_MESSAGE_LENGTH = 4_096;
-const MAX_ERROR_DIGEST_LENGTH = 256;
-const MAX_ERROR_KIND_LENGTH = 256;
-const MAX_ERROR_STACK_LENGTH = 32_768;
 const MAX_LOG_MESSAGE_LENGTH = 4_096;
 const SPAN_ID_PATTERN = /^[0-9a-f]{16}$/;
 const TRACE_ID_PATTERN = /^[0-9a-f]{32}$/;
@@ -38,12 +41,8 @@ const RESERVED_LOG_KEYS = new Set([
 
 export type DatadogLogLevel = 'debug' | 'error' | 'info' | 'warn';
 
-export interface SerializedError {
-  digest?: string;
-  kind: string;
-  message: string;
-  stack?: string;
-}
+export { serializeError } from './internal/error';
+export type { SerializedError } from './internal/error';
 
 export interface DatadogLogRecord {
   [key: string]: unknown;
@@ -64,6 +63,11 @@ export interface DatadogLogRecord {
 export interface DatadogLogDetails {
   attributes?: TelemetryAttributes;
   error?: unknown;
+  /**
+   * Explicit correlation identifiers for logs emitted after an asynchronous
+   * boundary. Values are validated before they are written.
+   */
+  traceIdentifiers?: TraceIdentifiers;
 }
 
 export type DatadogLogWriter = (level: DatadogLogLevel, record: Readonly<DatadogLogRecord>) => void;
@@ -72,7 +76,7 @@ export interface CreateDatadogLoggerOptions extends UnifiedServiceTags {
   clock?: () => Date;
   getTraceIdentifiers?: () => TraceIdentifiers | undefined;
   onWriteError?: (error: unknown) => void;
-  transformError?: (error: Readonly<SerializedError>) => SerializedError;
+  transformError?: TransformError;
   write?: DatadogLogWriter;
 }
 
@@ -118,75 +122,6 @@ export const getActiveTraceIdentifiers = (): TraceIdentifiers | undefined => {
   };
 };
 
-const safeStringify = (value: unknown): string => {
-  try {
-    return String(value);
-  } catch {
-    return '[unserializable thrown value]';
-  }
-};
-
-const normalizeErrorField = (value: unknown, fallback: string, maximumLength: number): string => {
-  if (typeof value !== 'string' || value.length === 0) {
-    return fallback;
-  }
-
-  return value.slice(0, maximumLength);
-};
-
-const normalizeSerializedError = (error: unknown): SerializedError => {
-  if (!error || typeof error !== 'object') {
-    return {
-      kind: 'Error',
-      message: '[invalid transformed error]',
-    };
-  }
-
-  const candidate = error as Partial<SerializedError>;
-  const normalizedError: SerializedError = {
-    kind: normalizeErrorField(candidate.kind, 'Error', MAX_ERROR_KIND_LENGTH),
-    message: normalizeErrorField(
-      candidate.message,
-      '[invalid transformed error]',
-      MAX_ERROR_MESSAGE_LENGTH,
-    ),
-  };
-
-  if (typeof candidate.digest === 'string' && candidate.digest.length > 0) {
-    normalizedError.digest = candidate.digest.slice(0, MAX_ERROR_DIGEST_LENGTH);
-  }
-
-  if (typeof candidate.stack === 'string' && candidate.stack.length > 0) {
-    normalizedError.stack = candidate.stack.slice(0, MAX_ERROR_STACK_LENGTH);
-  }
-
-  return normalizedError;
-};
-
-export const serializeError = (error: unknown): SerializedError => {
-  if (!(error instanceof Error)) {
-    return {
-      kind: typeof error,
-      message: safeStringify(error).slice(0, MAX_ERROR_MESSAGE_LENGTH),
-    };
-  }
-
-  const serializedError: SerializedError = {
-    kind: normalizeErrorField(error.name, 'Error', MAX_ERROR_KIND_LENGTH),
-    message: normalizeErrorField(error.message, '', MAX_ERROR_MESSAGE_LENGTH),
-  };
-
-  if ('digest' in error && typeof error.digest === 'string' && error.digest.length > 0) {
-    serializedError.digest = error.digest.slice(0, MAX_ERROR_DIGEST_LENGTH);
-  }
-
-  if (error.stack) {
-    serializedError.stack = error.stack.slice(0, MAX_ERROR_STACK_LENGTH);
-  }
-
-  return serializedError;
-};
-
 const getCorrelatableTraceIdentifiers = (
   getTraceIdentifiers: () => TraceIdentifiers | undefined,
 ): TraceIdentifiers | undefined => {
@@ -207,19 +142,20 @@ const getCorrelatableTraceIdentifiers = (
 };
 
 const serializeLogError = (
-  error: unknown,
+  details: DatadogLogDetails,
   transformError: CreateDatadogLoggerOptions['transformError'],
 ): SerializedError | undefined => {
+  const serializedError = getSerializedError(details);
+  if (serializedError) {
+    return serializedError;
+  }
+
+  const { error } = details;
   if (error === undefined) {
     return undefined;
   }
 
-  const serializedError = serializeError(error);
-  if (!transformError) {
-    return serializedError;
-  }
-
-  return normalizeSerializedError(transformError(serializedError));
+  return transformSerializedError(serializeError(error), transformError);
 };
 
 interface LogRecordDependencies {
@@ -251,13 +187,17 @@ const createLogRecord = (
     version: dependencies.tags.version,
   };
 
-  const traceIdentifiers = getCorrelatableTraceIdentifiers(dependencies.getTraceIdentifiers);
+  let traceIdentifierSource = dependencies.getTraceIdentifiers;
+  if (details.traceIdentifiers) {
+    traceIdentifierSource = () => details.traceIdentifiers;
+  }
+  const traceIdentifiers = getCorrelatableTraceIdentifiers(traceIdentifierSource);
   if (traceIdentifiers) {
     record.span_id = traceIdentifiers.spanId;
     record.trace_id = traceIdentifiers.traceId;
   }
 
-  const error = serializeLogError(details.error, dependencies.transformError);
+  const error = serializeLogError(details, dependencies.transformError);
   if (error) {
     record.error = error;
   }

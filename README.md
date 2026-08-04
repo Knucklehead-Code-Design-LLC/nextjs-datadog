@@ -366,24 +366,65 @@ NEXT_PUBLIC_DD_VERSION=<same deployed commit SHA>
 
 The server error hook records:
 
-| Field                         | Source                                     |
-| ----------------------------- | ------------------------------------------ |
-| `http.request.method`         | Next.js request metadata                   |
-| `http.route`                  | Parameterized Next.js route                |
-| `url.path`                    | Optional path with query/fragment removed  |
-| `nextjs.router_kind`          | App Router or Pages Router                 |
-| `nextjs.route_type`           | Render, route, action, or proxy            |
-| `nextjs.render_source`        | Next.js render source, if set              |
-| `nextjs.revalidate_reason`    | Revalidation reason, if set                |
-| `request.id`                  | Configured request-ID header               |
-| `trace_id` / `span_id`        | Active OpenTelemetry context               |
-| `error.digest`                | Next.js error digest, if set               |
-| `service` / `env` / `version` | Unified service tags                       |
-| `telemetry.distro.*`          | Package name and installed package version |
+| Field                         | Source                                                     |
+| ----------------------------- | ---------------------------------------------------------- |
+| `message`                     | `Next.js request failed: <error kind>` by default          |
+| `http.request.method`         | Next.js request metadata                                   |
+| `http.route`                  | Parameterized Next.js route                                |
+| `url.path`                    | Optional, selected error path with query/fragment removed  |
+| `nextjs.router_kind`          | App Router or Pages Router                                 |
+| `nextjs.route_type`           | Render, route, action, or proxy                            |
+| `nextjs.render_source`        | Next.js render source, if set                              |
+| `nextjs.revalidate_reason`    | Revalidation reason, if set                                |
+| `request.id`                  | Configured request-ID header                               |
+| `trace_id` / `span_id`        | Active OpenTelemetry context snapshot                      |
+| `error.digest`                | Next.js error digest, if retained by the error transformer |
+| `service` / `env` / `version` | Unified service tags                                       |
+| `telemetry.distro.*`          | Package name and installed package version                 |
 
 Concrete URL paths in error metadata are disabled by default because dynamic
 segments may contain personal data. Set `includeUrlPath: true` only when your
-route design makes paths safe; queries and fragments are still removed.
+route design makes paths safe; queries and fragments are still removed. For
+mixed-sensitivity routes, prefer `formatRequestPath`. It receives only the
+query- and fragment-free pathname and can return selected safe segments or
+`undefined` to omit the field. Its result takes precedence over
+`includeUrlPath`; a callback failure never falls back to the raw path.
+
+Error-log Content defaults to the bounded error kind rather than the raw error
+message. To make a safe, actionable Content value (for example, an approved
+API status), first redact or allowlist with `transformError`, then format that
+transformed error with `formatRequestErrorMessage`:
+
+```ts
+const approvedApiMessages = new Set(['Unauthorized', 'Forbidden', 'Not Found']);
+
+const datadog = createNextDatadogInstrumentation({
+  env: process.env.DD_ENV!,
+  formatRequestErrorMessage: ({ kind, message }) => `Next.js request failed: ${kind}: ${message}`,
+  formatRequestPath: (pathname) => {
+    const [, scope, teamId, _secret, bicId] = pathname.split('/');
+    if (scope !== 'team' || !teamId || !bicId) {
+      return undefined;
+    }
+
+    return `/team/${teamId}/[redacted]/${bicId}`;
+  },
+  service: process.env.DD_SERVICE!,
+  transformError: ({ digest, kind, message }) => ({
+    digest,
+    kind,
+    message: approvedApiMessages.has(message) ? message : '[redacted]',
+  }),
+  version: process.env.DD_VERSION!,
+});
+```
+
+For the package's `createDatadogLogger`, `transformError` is applied once to
+request-error Content, log error fields, and span exception/status data. An
+injected custom logger owns its own error serialization and redaction. The
+selected `url.path` is error metadata; it does not relax the privacy processor
+for normal inbound spans, which continues to use a parameterized `http.route`
+or a redacted placeholder.
 Framework request spans use the parameterized `http.route` for their exported
 target and name when it is available. Cookies, authorization headers, bodies,
 and arbitrary request headers are not collected. Attribute keys, counts, and
@@ -429,9 +470,11 @@ logger.info('Order submitted', {
 
 When called in an active span, the log contains 32-character hexadecimal
 `trace_id` and 16-character hexadecimal `span_id` fields for Datadog
-correlation. Telemetry serialization and writer failures are contained so they
-cannot fail the application request. Use `transformError` to apply additional
-redaction.
+correlation. The request-error hook snapshots those identifiers before optional
+async metadata callbacks, so its own log and error span retain correlation if a
+callback loses active context. Telemetry serialization and writer failures are
+contained so they cannot fail the application request. Use `transformError` to
+apply additional redaction.
 
 ## What the complete trace shows
 

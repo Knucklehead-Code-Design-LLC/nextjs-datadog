@@ -9,7 +9,10 @@ import {
   detectAwsAmplifyResourceAttributes,
   type NextDatadogRequestError,
 } from '../src/instrumentation';
-import type { DatadogLogger } from '../src/server';
+import { createDatadogLogger, type DatadogLogger, type DatadogLogRecord } from '../src/server';
+
+const TRACE_ID = '0123456789abcdef0123456789abcdef';
+const SPAN_ID = '0123456789abcdef';
 
 const createErrorArguments = (
   error: unknown = new Error('render failed'),
@@ -421,7 +424,7 @@ describe('createNextDatadogInstrumentation', () => {
       code: SpanStatusCode.ERROR,
       message: 'render failed',
     });
-    expect(logError).toHaveBeenCalledWith('Next.js request failed', {
+    expect(logError).toHaveBeenCalledWith('Next.js request failed: Error', {
       attributes: expectedAttributes,
       error: thrownError,
     });
@@ -490,8 +493,195 @@ describe('createNextDatadogInstrumentation', () => {
       }),
     );
     expect(logError).toHaveBeenCalledOnce();
-    expect(logError.mock.calls[0]?.[0]).toBe('Next.js request failed');
+    expect(logError.mock.calls[0]?.[0]).toBe('Next.js request failed: Error');
     expect(logError.mock.calls[0]?.[1]?.attributes?.['error.digest']).toBe(expectedDigest);
+  });
+
+  it('uses the error kind, but not the raw error message, in default request-error content', async () => {
+    const { error: logError, logger } = createLogger();
+    const instrumentation = createNextDatadogInstrumentation({
+      env: 'test',
+      logger,
+      service: 'web',
+      version: '1',
+    });
+    const error = new Error('Unauthorized token=private');
+    error.name = 'ApiStatusError';
+
+    await instrumentation.onRequestError(...createErrorArguments(error));
+
+    const message = logError.mock.calls[0]?.[0];
+    expect(message).toBe('Next.js request failed: ApiStatusError');
+    expect(message).not.toContain('token=private');
+  });
+
+  it('uses a transformed error once for request-error content, logs, and spans', async () => {
+    const records: Readonly<DatadogLogRecord>[] = [];
+    const recordException = vi.fn();
+    const setStatus = vi.fn();
+    const span = {
+      recordException,
+      setAttributes: vi.fn(),
+      setStatus,
+    } as unknown as Span;
+    const transformError = vi.fn(() => ({
+      kind: 'ApiStatusError',
+      message: '[redacted]',
+    }));
+    vi.spyOn(trace, 'getSpan').mockReturnValue(span);
+    const logger = createDatadogLogger({
+      env: 'test',
+      getTraceIdentifiers: () => undefined,
+      service: 'web',
+      version: '1',
+      write: (_level, record) => {
+        records.push(record);
+      },
+    });
+    const instrumentation = createNextDatadogInstrumentation({
+      env: 'test',
+      formatRequestErrorMessage: ({ kind, message }) =>
+        `Next.js request failed: ${kind}: ${message}`,
+      logger,
+      service: 'web',
+      transformError,
+      version: '1',
+    });
+    const error = new Error('upstream token=secret');
+    error.name = 'ApiStatusError';
+
+    await instrumentation.onRequestError(...createErrorArguments(error));
+
+    expect(transformError).toHaveBeenCalledTimes(1);
+    expect(recordException).toHaveBeenCalledWith({
+      message: '[redacted]',
+      name: 'ApiStatusError',
+    });
+    expect(setStatus).toHaveBeenCalledWith({
+      code: SpanStatusCode.ERROR,
+      message: '[redacted]',
+    });
+    expect(records[0]).toMatchObject({
+      error: {
+        kind: 'ApiStatusError',
+        message: '[redacted]',
+      },
+      message: 'Next.js request failed: ApiStatusError: [redacted]',
+    });
+    expect(JSON.stringify(records[0])).not.toContain('token=secret');
+  });
+
+  it('bounds formatted request-error content before passing it to custom loggers', async () => {
+    const { error, logger } = createLogger();
+    const instrumentation = createNextDatadogInstrumentation({
+      env: 'test',
+      formatRequestErrorMessage: () => 'm'.repeat(5_000),
+      logger,
+      service: 'web',
+      version: '1',
+    });
+
+    await instrumentation.onRequestError(...createErrorArguments());
+
+    expect(error.mock.calls[0]?.[0]).toHaveLength(4_096);
+  });
+
+  it('fails closed when request-error transformation fails', async () => {
+    const records: Readonly<DatadogLogRecord>[] = [];
+    const recordException = vi.fn();
+    const span = {
+      recordException,
+      setAttributes: vi.fn(),
+      setStatus: vi.fn(),
+    } as unknown as Span;
+    vi.spyOn(trace, 'getSpan').mockReturnValue(span);
+    const logger = createDatadogLogger({
+      env: 'test',
+      getTraceIdentifiers: () => undefined,
+      service: 'web',
+      version: '1',
+      write: (_level, record) => {
+        records.push(record);
+      },
+    });
+    const instrumentation = createNextDatadogInstrumentation({
+      env: 'test',
+      logger,
+      service: 'web',
+      transformError: () => {
+        throw new Error('redactor failed');
+      },
+      version: '1',
+    });
+    const error = new Error('secret-api-response');
+
+    await instrumentation.onRequestError(...createErrorArguments(error));
+
+    const errorRecord = records.find((record) => record.level === 'error');
+    expect(recordException).toHaveBeenCalledWith({
+      message: '[error redacted because transformation failed]',
+      name: 'Error',
+    });
+    expect(errorRecord).toMatchObject({
+      error: {
+        kind: 'Error',
+        message: '[error redacted because transformation failed]',
+      },
+      message: 'Next.js request failed: Error',
+    });
+    expect(JSON.stringify(records)).not.toContain('secret-api-response');
+  });
+
+  it('preserves request-error correlation when async metadata loses active context', async () => {
+    const records: Readonly<DatadogLogRecord>[] = [];
+    const recordException = vi.fn();
+    const setAttributes = vi.fn();
+    const span = {
+      recordException,
+      setAttributes,
+      setStatus: vi.fn(),
+      spanContext: () => ({
+        spanId: SPAN_ID,
+        traceFlags: 1,
+        traceId: TRACE_ID,
+      }),
+    } as unknown as Span;
+    let hasActiveContext = true;
+    vi.spyOn(trace, 'getSpan').mockImplementation(() => {
+      if (hasActiveContext) {
+        return span;
+      }
+
+      return undefined;
+    });
+    const logger = createDatadogLogger({
+      env: 'test',
+      service: 'web',
+      version: '1',
+      write: (_level, record) => {
+        records.push(record);
+      },
+    });
+    const instrumentation = createNextDatadogInstrumentation({
+      env: 'test',
+      getRequestAttributes: async () => {
+        await Promise.resolve();
+        hasActiveContext = false;
+        return {};
+      },
+      logger,
+      service: 'web',
+      version: '1',
+    });
+
+    await instrumentation.onRequestError(...createErrorArguments());
+
+    expect(recordException).toHaveBeenCalledOnce();
+    expect(setAttributes).toHaveBeenCalledOnce();
+    expect(records[0]).toMatchObject({
+      span_id: SPAN_ID,
+      trace_id: TRACE_ID,
+    });
   });
 
   it('omits the concrete URL path by default', async () => {
@@ -507,6 +697,58 @@ describe('createNextDatadogInstrumentation', () => {
 
     expect(error).toHaveBeenCalledOnce();
     expect(error.mock.calls[0]?.[1]?.attributes).not.toHaveProperty('url.path');
+  });
+
+  it('lets applications retain selected request-path segments without retaining queries', async () => {
+    const { error, logger } = createLogger();
+    const formatRequestPath = vi.fn((pathname: string) => {
+      expect(pathname).toBe('/orders/123');
+      return '/team/tenant-42/[redacted]/bic-123?token=private#details';
+    });
+    const instrumentation = createNextDatadogInstrumentation({
+      env: 'test',
+      formatRequestPath,
+      includeUrlPath: true,
+      logger,
+      service: 'web',
+      version: '1',
+    });
+
+    await instrumentation.onRequestError(...createErrorArguments());
+
+    expect(formatRequestPath).toHaveBeenCalledWith(
+      '/orders/123',
+      expect.objectContaining({ routePath: '/orders/[id]' }),
+    );
+    expect(error.mock.calls[0]?.[1]?.attributes?.['url.path']).toBe(
+      '/team/tenant-42/[redacted]/bic-123',
+    );
+  });
+
+  it('omits a concrete path instead of falling back to raw data when formatting fails', async () => {
+    const { error, logger, warn } = createLogger();
+    const instrumentation = createNextDatadogInstrumentation({
+      env: 'test',
+      formatRequestPath: () => {
+        throw new Error('path formatting failed');
+      },
+      includeUrlPath: true,
+      logger,
+      service: 'web',
+      version: '1',
+    });
+
+    await instrumentation.onRequestError(...createErrorArguments());
+
+    expect(error.mock.calls[0]?.[1]?.attributes).not.toHaveProperty('url.path');
+    expect(warn).toHaveBeenCalledWith(
+      'nextjs-datadog telemetry reporting failed',
+      expect.objectContaining({
+        attributes: {
+          'nextjs_datadog.diagnostic': 'request_path',
+        },
+      }),
+    );
   });
 
   it('reserves capacity and names for framework request attributes', async () => {
