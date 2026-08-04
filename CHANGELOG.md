@@ -1,5 +1,12 @@
 # nextjs-datadog
 
+## 0.4.0
+
+### Minor Changes
+
+- 20acc89: Improve request-error Content, preserve correlation across asynchronous metadata
+  callbacks, and add privacy-preserving controls for error paths and messages.
+
 ## 0.3.2
 
 ### Patch Changes
